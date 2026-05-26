@@ -93,7 +93,9 @@ export default class ProductsView extends BaseView {
                         ${formatPKR(p.defaultPrice)}
                         <span class="block text-[10px] text-slate-500">Loyal: ${formatPKR(p.loyalPrice)}</span>
                       </td>
-                      <td class="py-4 px-6 text-right">
+                      <td class="py-4 px-6 text-right space-x-1.5">
+                        <button data-edit-id="${p.id}" class="px-2.5 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/10 rounded-lg text-xs font-semibold transition-active">Edit</button>
+                        <button data-delete-id="${p.id}" class="px-2.5 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/10 rounded-lg text-xs font-semibold transition-active">Delete</button>
                         <button data-detail-id="${p.id}" class="px-3.5 py-1.5 bg-slate-700/50 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold border border-slate-600/30 transition-active">
                           View Batches
                         </button>
@@ -296,10 +298,13 @@ export default class ProductsView extends BaseView {
 
   async postRender() {
     this.setupAddProductDrawer();
+    this.setupEditProduct();
+    this.setupDeleteProduct();
     this.setupDetailsModal();
   }
 
   setupAddProductDrawer() {
+    this.editingProductId = null;
     const btnAdd = document.getElementById('btn-add-product');
     const btnCancel = document.getElementById('btn-cancel-drawer');
     const btnClose = document.getElementById('drawer-close');
@@ -328,6 +333,9 @@ export default class ProductsView extends BaseView {
         drawer.classList.add('hidden');
         form.reset();
         errDiv.classList.add('hidden');
+        this.editingProductId = null;
+        const submitBtn = drawer.querySelector('button[type="submit"]');
+        if (submitBtn) submitBtn.innerText = 'Save Product';
       }, 300);
     };
 
@@ -366,14 +374,82 @@ export default class ProductsView extends BaseView {
         return;
       }
 
-      const res = await API.createProduct(payload);
+      if (this.editingProductId) {
+        const res = await API.updateProduct({ id: this.editingProductId, ...payload });
+        if (res.success) {
+          this.editingProductId = null;
+          closeDrawer();
+          await this.mount(this.container);
+        } else {
+          errDiv.innerText = res.error || "Failed to update product.";
+          errDiv.classList.remove('hidden');
+        }
+      } else {
+        const res = await API.createProduct(payload);
+        if (res.success) {
+          closeDrawer();
+          await this.mount(this.container);
+        } else {
+          errDiv.innerText = res.error || "Failed to create product.";
+          errDiv.classList.remove('hidden');
+        }
+      }
+    });
+  }
+
+  setupEditProduct() {
+    this.container.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-edit-id]');
+      if (!btn) return;
+      const productId = btn.getAttribute('data-edit-id');
+
+      const res = await API.getProductDetails(productId);
+      if (!res.success) {
+        alert(res.error || 'Failed to load product details');
+        return;
+      }
+
+      const p = res.data;
+
+      const drawer = document.getElementById('drawer-add-product');
+      const overlay = document.getElementById('drawer-overlay');
+      const panel = document.getElementById('drawer-panel');
+
+      document.querySelector('input[name="name"]').value = p.name;
+      document.querySelector('input[name="sku"]').value = p.sku || '';
+      document.querySelector('select[name="category"]').value = p.category;
+      document.querySelector('select[name="type"]').value = p.type;
+      document.querySelector('select[name="unit"]').value = p.unit;
+      document.querySelector('input[name="defaultPrice"]').value = p.defaultPrice;
+      document.querySelector('input[name="loyalPrice"]').value = p.loyalPrice;
+      document.querySelector('input[name="lowStockAlert"]').value = p.lowStockAlert;
+
+      const submitBtn = drawer.querySelector('button[type="submit"]');
+      submitBtn.innerText = 'Update Product';
+
+      this.editingProductId = productId;
+
+      drawer.classList.remove('hidden');
+      setTimeout(() => {
+        overlay.classList.remove('opacity-0');
+        overlay.classList.add('opacity-100');
+        panel.classList.remove('translate-x-full');
+        panel.classList.add('translate-x-0');
+      }, 50);
+    });
+  }
+
+  setupDeleteProduct() {
+    this.container.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-delete-id]');
+      if (!btn) return;
+      if (!confirm('Are you sure you want to delete this product? This may affect existing batches and transactions.')) return;
+      const id = btn.getAttribute('data-delete-id');
+      const res = await API.deleteProduct({ id });
       if (res.success) {
-        // Reload products view
-        closeDrawer();
         await this.mount(this.container);
       } else {
-        errDiv.innerText = res.error || "Failed to create product.";
-        errDiv.classList.remove('hidden');
+        alert(res.error || 'Failed to delete product.');
       }
     });
   }

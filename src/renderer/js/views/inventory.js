@@ -91,12 +91,13 @@ export default class InventoryView extends BaseView {
                 <th class="py-3.5 px-6">Remaining Qty</th>
                 <th class="py-3.5 px-6">Supplier</th>
                 <th class="py-3.5 px-6">Received Date</th>
+                <th class="py-3.5 px-6 text-right">Actions</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-700/30 text-sm text-slate-300">
               ${this.batches.length === 0 ? `
                 <tr>
-                  <td colspan="6" class="py-12 text-center text-slate-500">No active batches logged yet.</td>
+                  <td colspan="7" class="py-12 text-center text-slate-500">No active batches logged yet.</td>
                 </tr>
               ` : this.batches.map(b => {
                 const displayQty = Converter.formatQty(b.quantity, b.product.unit);
@@ -111,6 +112,9 @@ export default class InventoryView extends BaseView {
                     <td class="py-3.5 px-6 font-bold ${b.quantity <= 0 ? 'text-slate-500' : 'text-slate-200'}">${displayQty}</td>
                     <td class="py-3.5 px-6 text-slate-400">${b.supplier ? b.supplier.name : 'Internal Production'}</td>
                     <td class="py-3.5 px-6 text-xs text-slate-500">${formattedDate}</td>
+                    <td class="py-3.5 px-6 text-right">
+                      <button data-delete-batch-id="${b.id}" class="px-2.5 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/10 rounded-lg text-xs font-semibold transition-active">Delete</button>
+                    </td>
                   </tr>
                 `;
               }).join('')}
@@ -335,6 +339,7 @@ export default class InventoryView extends BaseView {
 
   async postRender() {
     this.setupTabsNavigation();
+    this.setupDeleteBatch();
 
     if (this.activeTab === 'purchase') {
       this.setupPurchaseForm();
@@ -357,6 +362,21 @@ export default class InventoryView extends BaseView {
     bindTab('tab-batches', 'batches');
     bindTab('tab-purchase', 'purchase');
     bindTab('tab-adjust', 'adjust');
+  }
+
+  setupDeleteBatch() {
+    this.container.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-delete-batch-id]');
+      if (!btn) return;
+      if (!confirm('Are you sure you want to delete this batch? This action will restore the stock and cannot be undone.')) return;
+      const id = btn.getAttribute('data-delete-batch-id');
+      const res = await API.deleteBatch({ id });
+      if (res.success) {
+        await this.mount(this.container);
+      } else {
+        alert(res.error || 'Failed to delete batch.');
+      }
+    });
   }
 
   // --- Purchase Builder Form Logic ---

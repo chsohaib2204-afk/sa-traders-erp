@@ -52,12 +52,13 @@ export default class ExpensesView extends BaseView {
                     <th class="py-3 px-4">Category</th>
                     <th class="py-3 px-4">Description</th>
                     <th class="py-3 px-4 text-right">Amount (PKR)</th>
+                    <th class="py-3 px-4 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-700/30 text-slate-300">
                   ${this.expenses.length === 0 ? `
                     <tr>
-                      <td colspan="4" class="py-8 text-center text-slate-500">No expenses recorded yet.</td>
+                      <td colspan="5" class="py-8 text-center text-slate-500">No expenses recorded yet.</td>
                     </tr>
                   ` : this.expenses.map(e => {
                     const formattedDate = new Date(e.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -77,6 +78,10 @@ export default class ExpensesView extends BaseView {
                         <td class="py-3 px-4 text-slate-300 font-medium">${e.description || 'N/A'}</td>
                         <td class="py-3 px-4 text-right font-bold text-rose-400">
                           ${formatPKR(e.amount)}
+                        </td>
+                        <td class="py-3 px-4 text-right">
+                          <button data-edit-id="${e.id}" class="px-2 py-1 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/10 rounded text-[10px] font-semibold transition-active mr-1">Edit</button>
+                          <button data-delete-id="${e.id}" class="px-2 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/10 rounded text-[10px] font-semibold transition-active">Delete</button>
                         </td>
                       </tr>
                     `;
@@ -137,9 +142,53 @@ export default class ExpensesView extends BaseView {
 
   async postRender() {
     this.setupExpenseForm();
+    this.setupEditExpense();
+    this.setupDeleteExpense();
+  }
+
+  setupDeleteExpense() {
+    this.container.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-delete-id]');
+      if (!btn) return;
+      if (!confirm('Delete this expense record?')) return;
+      const id = btn.getAttribute('data-delete-id');
+      const res = await API.deleteExpense({ id });
+      if (res.success) {
+        await this.mount(this.container);
+      } else {
+        alert(res.error || 'Failed to delete expense.');
+      }
+    });
+  }
+
+  setupEditExpense() {
+    this.container.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-edit-id]');
+      if (!btn) return;
+      const id = btn.getAttribute('data-edit-id');
+
+      const expense = this.expenses.find(ex => ex.id === id);
+      if (!expense) {
+        alert('Expense data not found.');
+        return;
+      }
+
+      this.editingExpenseId = id;
+
+      document.getElementById('exp-category').value = expense.category;
+      document.getElementById('exp-date').value = expense.date.split('T')[0];
+      document.getElementById('exp-amount').value = expense.amount;
+      document.getElementById('exp-desc').value = expense.description || '';
+
+      const submitBtn = document.querySelector('#form-expense button[type="submit"]');
+      if (submitBtn) submitBtn.innerText = 'Update Expense';
+
+      document.getElementById('form-expense').scrollIntoView({ behavior: 'smooth' });
+    });
   }
 
   setupExpenseForm() {
+    this.editingExpenseId = null;
     const form = document.getElementById('form-expense');
     const errDiv = document.getElementById('expense-error');
 
@@ -158,13 +207,25 @@ export default class ExpensesView extends BaseView {
         return;
       }
 
-      const res = await API.createExpense({ category, date, amount, description });
-      if (res.success) {
-        // Refresh view
-        await this.mount(this.container);
+      if (this.editingExpenseId) {
+        const res = await API.updateExpense({ id: this.editingExpenseId, category, date, amount, description });
+        if (res.success) {
+          this.editingExpenseId = null;
+          const submitBtn = document.querySelector('#form-expense button[type="submit"]');
+          if (submitBtn) submitBtn.innerText = 'Record Factory Expense';
+          await this.mount(this.container);
+        } else {
+          errDiv.innerText = res.error || 'Failed to update expense.';
+          errDiv.classList.remove('hidden');
+        }
       } else {
-        errDiv.innerText = res.error || "Expense logging failed.";
-        errDiv.classList.remove('hidden');
+        const res = await API.createExpense({ category, date, amount, description });
+        if (res.success) {
+          await this.mount(this.container);
+        } else {
+          errDiv.innerText = res.error || "Expense logging failed.";
+          errDiv.classList.remove('hidden');
+        }
       }
     });
   }

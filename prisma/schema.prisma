@@ -71,18 +71,18 @@ model Customer {
 
 // 4. LedgerEntry Model (Individual debit/credit customer khata ledger entries)
 model LedgerEntry {
-  id             String        @id @default(uuid())
-  customerId     String
-  customer       Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  date           DateTime      @default(now())
+  id             String         @id @default(uuid())
+  customerId     String?
+  customer       Customer?      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  date           DateTime       @default(now())
   description    String
-  type           String        // "DEBIT" (increases what they owe us), "CREDIT" (decreases balance/payment)
+  type           String         // "DEBIT", "CREDIT", "SALE", "PAYMENT"
   amount         Float
-  runningBalance Float         // Post-transaction running balance
+  runningBalance Float          // Post-transaction running balance
   saleId         String?
-  sale           Sale?         @relation(fields: [saleId], references: [id], onDelete: SetNull)
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  sale           Sale?          @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 }
 
 // 5. Supplier Model
@@ -148,6 +148,7 @@ model Sale {
 
   saleItems           SaleItem[]
   ledgerEntries       LedgerEntry[]
+  saleAddons          SaleAddon[]
 }
 
 // 9. SaleItem Model (Individual invoice lines)
@@ -199,9 +200,12 @@ model Production {
   productId        String           // Product made
   recipeId         String?
   batchNumber      String           // New batch code generated for the produced stock
-  quantityProduced Float            // Total qty produced
+  quantityProduced Float            // Total qty produced (in kg)
+  ingredientCost   Float            @default(0) // Cost of ingredients consumed
+  extraCost        Float            @default(0)  // Labor, electricity, transport, misc
+  totalCost        Float            // ingredientCost + extraCost
   costPerUnit      Float            // Total cost / quantityProduced
-  totalCost        Float            // Combined cost of all ingredients consumed
+  sellingPricePerKg Float          @default(0) // Product sale price at production time
   productionDate   DateTime         @default(now())
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
@@ -261,4 +265,36 @@ model StockMovement {
   unit        String
   description String?
   createdAt   DateTime      @default(now())
+}
+
+// 17. SaleAddon Model (Extra charges during invoicing)
+model SaleAddon {
+  id        String   @id @default(uuid())
+  saleId    String
+  sale      Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  title     String
+  amount    Float
+  createdAt DateTime @default(now())
+}
+
+// 18. CashBox Model (Tracks cash/bank deposits and withdrawals)
+model CashBox {
+  id          String   @id @default(uuid())
+  date        DateTime @default(now())
+  type        String   // "DEPOSIT", "WITHDRAWAL"
+  amount      Float
+  description String
+  referenceType String? // "SALE", "KHATA_PAYMENT", "EXPENSE", etc.
+  referenceId String?
+  runningBalance Float
+  createdAt   DateTime @default(now())
+}
+
+// 19. PartnerWithdrawal Model
+model PartnerWithdrawal {
+  id          String   @id @default(uuid())
+  partnerName String
+  amount      Float
+  note        String?
+  createdAt   DateTime @default(now())
 }

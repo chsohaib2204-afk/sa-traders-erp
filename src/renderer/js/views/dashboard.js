@@ -8,6 +8,7 @@ export default class DashboardView extends BaseView {
     this.transactions = [];
     this.lowStock = [];
     this.chartInstance = null;
+    this.partnerWithdrawals = [];
   }
 
   async preRender() {
@@ -19,6 +20,9 @@ export default class DashboardView extends BaseView {
     if (summaryRes.success) this.summary = summaryRes.data;
     if (transactionsRes.success) this.transactions = transactionsRes.data;
     if (lowStockRes.success) this.lowStock = lowStockRes.data;
+
+    const partnerWdRes = await API.getPartnerWithdrawals();
+    if (partnerWdRes.success) this.partnerWithdrawals = partnerWdRes.data;
   }
 
   render() {
@@ -37,8 +41,13 @@ export default class DashboardView extends BaseView {
       mainBranchPayable,
       grossProfit,
       netProfit,
-      lowStockCount
+      lowStockCount,
+      cashBoxBalance,
+      todayGrossProfit,
+      todayNetProfit
     } = this.summary;
+
+    const khataAddedToday = Math.max(0, todaySales - todayCash);
 
     // Standard Currency Formatter (PKR Rs.)
     const formatPKR = (num) => {
@@ -63,8 +72,8 @@ export default class DashboardView extends BaseView {
           </div>
         </div>
 
-        <!-- 4 Essential Accounting Cards -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+        <!-- 5 Essential Accounting Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-5">
           <!-- Card 1: Today Sales -->
           <div class="p-6 bg-darkbg-800 border border-slate-700/30 rounded-xl relative overflow-hidden group hover:border-brand-500/30 transition-active">
             <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-brand-500/5 rounded-full group-hover:scale-125 transition-active"></div>
@@ -82,11 +91,21 @@ export default class DashboardView extends BaseView {
             <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Today's Cash Received</div>
             <div class="mt-2 text-2xl font-bold text-emerald-400">${formatPKR(todayCash)}</div>
             <div class="mt-3 text-xs text-slate-400">
-              <span class="text-slate-300 font-medium">${formatPKR(todaySales - todayCash)}</span> added to Khata credits
+              <span class="text-slate-300 font-medium">${formatPKR(khataAddedToday)}</span> added to Khata (credit sales)
             </div>
           </div>
 
-          <!-- Card 3: Total Khata balance -->
+          <!-- Card 3: Cash Box Balance -->
+          <div class="p-6 bg-darkbg-800 border border-slate-700/30 rounded-xl relative overflow-hidden group hover:border-brand-500/30 transition-active">
+            <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-cyan-500/5 rounded-full group-hover:scale-125 transition-active"></div>
+            <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Cash Box Balance</div>
+            <div class="mt-2 text-2xl font-bold text-cyan-400">${formatPKR(cashBoxBalance || 0)}</div>
+            <div class="mt-3 text-xs text-slate-400">
+              On-hand cash & bank receipts
+            </div>
+          </div>
+
+          <!-- Card 4: Total Khata balance -->
           <div class="p-6 bg-darkbg-800 border border-slate-700/30 rounded-xl relative overflow-hidden group hover:border-brand-500/30 transition-active">
             <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-yellow-500/5 rounded-full group-hover:scale-125 transition-active"></div>
             <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Customer Ledger (Khata)</div>
@@ -96,7 +115,7 @@ export default class DashboardView extends BaseView {
             </div>
           </div>
 
-          <!-- Card 4: Main Branch Payable -->
+          <!-- Card 5: Main Branch Payable -->
           <div class="p-6 bg-darkbg-800 border border-slate-700/30 rounded-xl relative overflow-hidden group hover:border-brand-500/30 transition-active">
             <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-rose-500/5 rounded-full group-hover:scale-125 transition-active"></div>
             <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Main Branch Payable</div>
@@ -129,6 +148,35 @@ export default class DashboardView extends BaseView {
             <div class="p-3 bg-sky-500/10 text-sky-400 rounded-lg">
               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
             </div>
+          </div>
+        </div>
+
+        <!-- Daily Profit & Partner Summary -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          <div class="p-5 bg-gradient-to-r from-emerald-950/40 to-darkbg-800 border border-emerald-500/20 rounded-xl">
+            <div class="text-xs font-semibold text-emerald-300 uppercase tracking-wider">Today's Gross Profit</div>
+            <div class="text-2xl font-bold text-emerald-400 mt-1">${formatPKR(todayGrossProfit)}</div>
+            <p class="text-[11px] text-slate-400 mt-1">Sales - COGS (today)</p>
+          </div>
+          <div class="p-5 bg-gradient-to-r from-sky-950/40 to-darkbg-800 border border-sky-500/20 rounded-xl">
+            <div class="text-xs font-semibold text-sky-300 uppercase tracking-wider">Today's Net Profit</div>
+            <div class="text-2xl font-bold ${todayNetProfit >= 0 ? 'text-sky-400' : 'text-rose-400'} mt-1">${formatPKR(todayNetProfit)}</div>
+            <p class="text-[11px] text-slate-400 mt-1">Gross - Today's expenses</p>
+          </div>
+          <div class="p-5 bg-gradient-to-r from-amber-950/40 to-darkbg-800 border border-amber-500/20 rounded-xl">
+            <div class="text-xs font-semibold text-amber-300 uppercase tracking-wider">Sohaib Withdrawals</div>
+            <div class="text-2xl font-bold text-amber-400 mt-1">${formatPKR(this.partnerWithdrawals.filter(w => w.partnerName.toLowerCase().includes('sohaib')).reduce((s, w) => s + w.amount, 0))}</div>
+            <p class="text-[11px] text-slate-400 mt-1">Total withdrawn</p>
+          </div>
+          <div class="p-5 bg-gradient-to-r from-cyan-950/40 to-darkbg-800 border border-cyan-500/20 rounded-xl">
+            <div class="text-xs font-semibold text-cyan-300 uppercase tracking-wider">Tayyab Withdrawals</div>
+            <div class="text-2xl font-bold text-cyan-400 mt-1">${formatPKR(this.partnerWithdrawals.filter(w => w.partnerName.toLowerCase().includes('tayyab')).reduce((s, w) => s + w.amount, 0))}</div>
+            <p class="text-[11px] text-slate-400 mt-1">Total withdrawn</p>
+          </div>
+          <div class="p-5 bg-gradient-to-r from-violet-950/40 to-darkbg-800 border border-violet-500/20 rounded-xl">
+            <div class="text-xs font-semibold text-violet-300 uppercase tracking-wider">Aqib Withdrawals</div>
+            <div class="text-2xl font-bold text-violet-400 mt-1">${formatPKR(this.partnerWithdrawals.filter(w => w.partnerName.toLowerCase().includes('aqib')).reduce((s, w) => s + w.amount, 0))}</div>
+            <p class="text-[11px] text-slate-400 mt-1">Total withdrawn</p>
           </div>
         </div>
 

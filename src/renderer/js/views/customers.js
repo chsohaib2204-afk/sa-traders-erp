@@ -69,7 +69,9 @@ export default class CustomersView extends BaseView {
                     <td class="py-4 px-6 text-xs text-slate-400">${c.isLoyal ? 'Premium (Loyal Price)' : 'Standard (Default Price)'}</td>
                     <td class="py-4 px-6 font-bold ${c.balance > 0 ? 'text-rose-400' : 'text-emerald-400'}">${formatPKR(c.balance)}</td>
                     <td class="py-4 px-6 text-xs text-slate-400 max-w-[150px] truncate" title="${c.address}">${c.address || '--'}</td>
-                    <td class="py-4 px-6 text-right">
+                    <td class="py-4 px-6 text-right space-x-1.5">
+                      <button data-edit-id="${c.id}" class="px-2.5 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/10 rounded-lg text-xs font-semibold transition-active">Edit</button>
+                      <button data-delete-id="${c.id}" class="px-2.5 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/10 rounded-lg text-xs font-semibold transition-active">Delete</button>
                       <button data-ledger-id="${c.id}" class="px-3 py-1.5 bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/10 rounded-lg text-xs font-semibold transition-active">
                         View Khata Ledger
                       </button>
@@ -151,10 +153,13 @@ export default class CustomersView extends BaseView {
 
   async postRender() {
     this.setupAddCustomerDrawer();
+    this.setupEditCustomer();
+    this.setupDeleteCustomer();
     this.setupDeepLinkLedgers();
   }
 
   setupAddCustomerDrawer() {
+    this.editingCustomerId = null;
     const btnAdd = document.getElementById('btn-add-customer');
     const btnCancel = document.getElementById('btn-cancel-drawer');
     const btnClose = document.getElementById('drawer-close');
@@ -183,6 +188,9 @@ export default class CustomersView extends BaseView {
         drawer.classList.add('hidden');
         form.reset();
         errDiv.classList.add('hidden');
+        this.editingCustomerId = null;
+        const submitBtn = drawer.querySelector('button[type="submit"]');
+        if (submitBtn) submitBtn.innerText = 'Save Profile';
       }, 300);
     };
 
@@ -211,13 +219,80 @@ export default class CustomersView extends BaseView {
         return;
       }
 
-      const res = await API.createCustomer(payload);
+      if (this.editingCustomerId) {
+        const res = await API.updateCustomer({ id: this.editingCustomerId, ...payload });
+        if (res.success) {
+          this.editingCustomerId = null;
+          closeDrawer();
+          await this.mount(this.container);
+        } else {
+          errDiv.innerText = res.error || "Failed to update customer.";
+          errDiv.classList.remove('hidden');
+        }
+      } else {
+        const res = await API.createCustomer(payload);
+        if (res.success) {
+          closeDrawer();
+          await this.mount(this.container);
+        } else {
+          errDiv.innerText = res.error || "Failed to create customer.";
+          errDiv.classList.remove('hidden');
+        }
+      }
+    });
+  }
+
+  setupEditCustomer() {
+    this.container.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-edit-id]');
+      if (!btn) return;
+      const customerId = btn.getAttribute('data-edit-id');
+
+      const res = await API.getCustomerLedger(customerId);
+      if (!res.success) {
+        alert(res.error || 'Failed to load customer details');
+        return;
+      }
+
+      const c = res.data.customer;
+
+      const drawer = document.getElementById('drawer-add-customer');
+      const overlay = document.getElementById('drawer-overlay');
+      const panel = document.getElementById('drawer-panel');
+
+      document.querySelector('input[name="name"]').value = c.name;
+      document.querySelector('input[name="phone"]').value = c.phone || '';
+      document.querySelector('input[name="address"]').value = c.address || '';
+      document.getElementById('isLoyal').checked = c.isLoyal;
+      document.getElementById('isMainBranchCustomer').checked = c.isMainBranchCustomer;
+      document.querySelector('input[name="initialBalance"]').value = c.balance || 0;
+
+      const submitBtn = drawer.querySelector('button[type="submit"]');
+      submitBtn.innerText = 'Update Customer';
+
+      this.editingCustomerId = customerId;
+
+      drawer.classList.remove('hidden');
+      setTimeout(() => {
+        overlay.classList.remove('opacity-0');
+        overlay.classList.add('opacity-100');
+        panel.classList.remove('translate-x-full');
+        panel.classList.add('translate-x-0');
+      }, 50);
+    });
+  }
+
+  setupDeleteCustomer() {
+    this.container.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-delete-id]');
+      if (!btn) return;
+      if (!confirm('Are you sure you want to delete this customer? This will also remove their ledger records.')) return;
+      const id = btn.getAttribute('data-delete-id');
+      const res = await API.deleteCustomer({ id });
       if (res.success) {
-        closeDrawer();
         await this.mount(this.container);
       } else {
-        errDiv.innerText = res.error || "Failed to create customer.";
-        errDiv.classList.remove('hidden');
+        alert(res.error || 'Failed to delete customer.');
       }
     });
   }

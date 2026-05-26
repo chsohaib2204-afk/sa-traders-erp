@@ -9,6 +9,8 @@ import BranchView from './views/branch.js';
 import ExpensesView from './views/expenses.js';
 import ReportsView from './views/reports.js';
 import SettingsView from './views/settings.js';
+import PartnersView from './views/partners.js';
+import CashBoxView from './views/cashbox.js';
 
 /**
  * SPA router — maps sidebar navigation to view controllers.
@@ -29,6 +31,8 @@ class App {
       branch: BranchView,
       expenses: ExpensesView,
       reports: ReportsView,
+      partners: PartnersView,
+      cashbox: CashBoxView,
       settings: SettingsView,
     };
   }
@@ -65,10 +69,17 @@ class App {
   async switchView(viewName) {
     console.log(`[Router] Navigating to: ${viewName}`);
 
+    // Replace content area with a fresh clone to remove all stale event listeners
+    const oldContent = this.contentArea;
+    const parent = oldContent.parentNode;
+    const newContent = document.createElement('div');
+    newContent.id = 'content-area';
+    newContent.className = oldContent.className;
+    parent.replaceChild(newContent, oldContent);
+    this.contentArea = newContent;
+
     this.contentArea.classList.add('opacity-0', 'transition-all', 'duration-150');
     await new Promise(resolve => setTimeout(resolve, 150));
-
-    this.contentArea.innerHTML = '';
 
     const ViewClass = this.views[viewName];
 

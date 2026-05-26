@@ -85,6 +85,10 @@ const API = {
     return await this.dbAction('create-sale', payload);
   },
 
+  async getSaleByInvoice(invoiceNumber) {
+    return await this.dbAction('get-sale-by-invoice', { invoiceNumber });
+  },
+
   // --- Phase 5: Wanda Manufacturing Recipes ---
   async getRecipes() {
     return await this.dbAction('get-recipes');
@@ -114,6 +118,71 @@ const API = {
 
   async createExpense(payload) {
     return await this.dbAction('create-expense', payload);
+  },
+  async updateCustomer(payload) {
+    return await this.dbAction('update-customer', payload);
+  },
+  async deleteCustomer(payload) {
+    return await this.dbAction('delete-customer', payload);
+  },
+  async updateProduct(payload) {
+    return await this.dbAction('update-product', payload);
+  },
+  async deleteProduct(payload) {
+    return await this.dbAction('delete-product', payload);
+  },
+  async deleteSale(payload) {
+    return await this.dbAction('delete-sale', payload);
+  },
+  async deleteLedgerEntry(payload) {
+    return await this.dbAction('delete-ledger-entry', payload);
+  },
+  async deleteBatch(payload) {
+    return await this.dbAction('delete-batch', payload);
+  },
+  async updateRecipe(payload) {
+    return await this.dbAction('update-recipe', payload);
+  },
+  async deleteRecipe(payload) {
+    return await this.dbAction('delete-recipe', payload);
+  },
+  async updateExpense(payload) {
+    return await this.dbAction('update-expense', payload);
+  },
+  async deleteExpense(payload) {
+    return await this.dbAction('delete-expense', payload);
+  },
+  async createSaleAddons(payload) {
+    return await this.dbAction('create-sale-addons', payload);
+  },
+  async getPartnerWithdrawals() {
+    return await this.dbAction('get-partner-withdrawals');
+  },
+  async createPartnerWithdrawal(payload) {
+    return await this.dbAction('create-partner-withdrawal', payload);
+  },
+  async deletePartnerWithdrawal(payload) {
+    return await this.dbAction('delete-partner-withdrawal', payload);
+  },
+  async getDailyProfit() {
+    return await this.dbAction('get-daily-profit');
+  },
+
+  // --- Cash Box ---
+  async cashBoxDeposit(payload) {
+    return await this.dbAction('cash-box-deposit', payload);
+  },
+
+  async cashBoxWithdraw(payload) {
+    return await this.dbAction('cash-box-withdraw', payload);
+  },
+
+  async getCashBoxBalance() {
+    return await this.dbAction('get-cash-box-balance');
+  },
+
+  async getCashBoxTransactions() {
+    return await this.dbAction('get-cash-box-transactions');
   },
 
   // --- Phase 8: Reports & Settings ---

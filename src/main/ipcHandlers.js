@@ -1,8 +1,8 @@
 const { ipcMain } = require('electron');
 const { PrismaClient } = require('../database/generated');
+const { convertToKg, convertFromKg, BAG_TO_KG } = require('./unitConverter.js');
 
 const prisma = new PrismaClient();
-const BAG_TO_KG = 40.0;
 
 /** True when inventory purchase was paid by main branch (IPC may send bool, 1, or string). */
 function isPaidByMainBranch(payload) {
@@ -54,6 +54,7 @@ ipcMain.handle('db-action', async (event, payload) => {
 
       // --- Phase 4: POS Sales Billing ---
       case 'create-sale': return await createSale(data);
+      case 'get-sale-by-invoice': return await getSaleByInvoice(data);
 
       // --- Phase 5: Wanda Manufacturing Recipes ---
       case 'get-recipes': return await getRecipes();
@@ -67,6 +68,28 @@ ipcMain.handle('db-action', async (event, payload) => {
       // --- Phase 7: Operational Expenses ---
       case 'get-expenses': return await getExpenses();
       case 'create-expense': return await createExpense(data);
+      case 'update-expense': return await updateExpense(data);
+      case 'delete-expense': return await deleteExpense(data);
+      case 'update-customer': return await updateCustomer(data);
+      case 'delete-customer': return await deleteCustomer(data);
+      case 'update-product': return await updateProduct(data);
+      case 'delete-product': return await deleteProduct(data);
+      case 'delete-sale': return await deleteSale(data);
+      case 'delete-ledger-entry': return await deleteLedgerEntry(data);
+      case 'delete-batch': return await deleteBatch(data);
+      case 'update-recipe': return await updateRecipe(data);
+      case 'delete-recipe': return await deleteRecipe(data);
+      case 'create-sale-addons': return await createSaleAddons(data);
+      case 'get-partner-withdrawals': return await getPartnerWithdrawals(data);
+      case 'create-partner-withdrawal': return await createPartnerWithdrawal(data);
+      case 'delete-partner-withdrawal': return await deletePartnerWithdrawal(data);
+      case 'get-daily-profit': return await getDailyProfit();
+
+      // --- Cash Box ---
+      case 'cash-box-deposit': return await cashBoxDeposit(data);
+      case 'cash-box-withdraw': return await cashBoxWithdraw(data);
+      case 'get-cash-box-balance': return await getCashBoxBalance();
+      case 'get-cash-box-transactions': return await getCashBoxTransactions();
 
       // --- Phase 8: Consolidated P&L Reports ---
       case 'get-reports-data': return await getReportsData(data);
@@ -90,13 +113,22 @@ async function getDashboardSummary() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
   const salesToday = await prisma.sale.aggregate({
-    _sum: { netAmount: true, paidAmount: true },
-    where: { saleDate: { gte: today } }
+    _sum: { netAmount: true },
+    where: { saleDate: { gte: today, lt: tomorrow } }
   });
 
   const todaySales = salesToday._sum.netAmount || 0.0;
-  const todayCash = salesToday._sum.paidAmount || 0.0;
+
+  // Today's cash = all Cash Box deposits (sale payments + Khata payments)
+  const cbDepositsToday = await prisma.cashBox.aggregate({
+    _sum: { amount: true },
+    where: { type: 'DEPOSIT', date: { gte: today, lt: tomorrow } }
+  });
+  const todayCash = cbDepositsToday._sum.amount || 0.0;
 
   const customerBalanceSum = await prisma.customer.aggregate({
     _sum: { balance: true }
@@ -108,23 +140,29 @@ async function getDashboardSummary() {
   });
   const mainBranchPayable = lastBranchTx ? lastBranchTx.runningPayable : 0.0;
 
-  const allSales = await prisma.saleItem.findMany({
-    select: { quantity: true, sellingPrice: true, costPrice: true }
+  // Get all sale items for COGS (cumulative)
+  const allSaleItems = await prisma.saleItem.findMany({
+    select: { quantity: true, costPrice: true }
   });
-
-  let totalSalesRevenue = 0.0;
   let totalCOGS = 0.0;
-
-  allSales.forEach(item => {
-    totalSalesRevenue += item.quantity * item.sellingPrice;
+  allSaleItems.forEach(item => {
     totalCOGS += item.quantity * item.costPrice;
   });
+
+  // Get all addon totals to exclude from gross profit
+  const allAddons = await prisma.saleAddon.findMany({
+    select: { amount: true }
+  });
+  const totalAddons = allAddons.reduce((s, a) => s + a.amount, 0);
 
   const salesAggregate = await prisma.sale.aggregate({
     _sum: { discount: true, netAmount: true }
   });
   const netSalesRevenue = salesAggregate._sum.netAmount || 0.0;
-  const grossProfit = netSalesRevenue - totalCOGS;
+
+  // Gross profit = sales revenue (excl addons) - COGS
+  const revenueExAddons = netSalesRevenue - totalAddons;
+  const grossProfit = revenueExAddons - totalCOGS;
 
   const expensesSum = await prisma.expense.aggregate({
     _sum: { amount: true }
@@ -163,6 +201,29 @@ async function getDashboardSummary() {
     });
   }
 
+  // Get Cash Box balance
+  const lastCb = await prisma.cashBox.findFirst({ orderBy: { createdAt: 'desc' } });
+  const cashBoxBalance = lastCb ? lastCb.runningBalance : 0.0;
+
+  // ---- Daily profit (today's revenue - today's COGS) ----
+  const todaySaleItems = await prisma.saleItem.findMany({
+    where: { sale: { saleDate: { gte: today, lt: tomorrow } } },
+    select: { quantity: true, sellingPrice: true, costPrice: true }
+  });
+  let todayRevenue = 0, todayCOGS = 0;
+  for (const item of todaySaleItems) {
+    todayRevenue += item.quantity * item.sellingPrice;
+    todayCOGS += item.quantity * item.costPrice;
+  }
+  const todayGrossProfit = todayRevenue - todayCOGS;
+
+  const todayExpAgg = await prisma.expense.aggregate({
+    _sum: { amount: true },
+    where: { date: { gte: today, lt: tomorrow } }
+  });
+  const todayExpTotal = todayExpAgg._sum.amount || 0;
+  const todayNetProfit = todayGrossProfit - todayExpTotal;
+
   return {
     success: true,
     data: {
@@ -173,14 +234,17 @@ async function getDashboardSummary() {
       grossProfit,
       netProfit,
       lowStockCount,
-      chartSales
+      chartSales,
+      cashBoxBalance,
+      todayGrossProfit,
+      todayNetProfit
     }
   };
 }
 
 async function getRecentTransactions() {
   const sales = await prisma.sale.findMany({
-    take: 5,
+    take: 50,
     orderBy: { saleDate: 'desc' },
     include: { customer: { select: { name: true } } }
   });
@@ -197,6 +261,25 @@ async function getRecentTransactions() {
   }));
 
   return { success: true, data: recentTxs };
+}
+
+async function getSaleByInvoice(data) {
+  const { invoiceNumber } = data;
+  if (!invoiceNumber) return { success: false, error: "Invoice number required" };
+  try {
+    const sale = await prisma.sale.findUnique({
+      where: { invoiceNumber },
+      include: {
+        customer: { select: { name: true, phone: true, address: true } },
+        saleItems: { include: { product: { select: { name: true } } } },
+        saleAddons: true
+      }
+    });
+    if (!sale) return { success: false, error: "Sale not found" };
+    return { success: true, data: sale };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 }
 
 async function getLowStockAlerts() {
@@ -559,7 +642,7 @@ async function receiveCustomerPayment(payload) {
   if (payVal <= 0) return { success: false, error: "Payment amount must be greater than zero." };
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx) => {
       const customer = await tx.customer.findUnique({ where: { id: customerId } });
       if (!customer) throw new Error("Customer not found");
 
@@ -570,7 +653,7 @@ async function receiveCustomerPayment(payload) {
         data: { balance: newBalance }
       });
 
-      const entry = await tx.ledgerEntry.create({
+      await tx.ledgerEntry.create({
         data: {
           customerId,
           date: date ? new Date(date) : new Date(),
@@ -580,9 +663,111 @@ async function receiveCustomerPayment(payload) {
           runningBalance: newBalance
         }
       });
-      return entry;
+
+      // Deposit to Cash Box
+      const lastCb = await tx.cashBox.findFirst({ orderBy: { createdAt: 'desc' } });
+      const prevCbBal = lastCb ? lastCb.runningBalance : 0.0;
+      await tx.cashBox.create({
+        data: {
+          type: 'DEPOSIT',
+          amount: payVal,
+          description: `Khata payment from ${customer.name}: ${description || `Rs.${payVal.toLocaleString()}`}`,
+          referenceType: 'KHATA_PAYMENT',
+          referenceId: customerId,
+          runningBalance: prevCbBal + payVal
+        }
+      });
     });
-    return { success: true, data: result };
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// --- CashBox Handlers ---
+
+async function cashBoxDeposit(data) {
+  const { amount, description, referenceType, referenceId } = data;
+  if (!amount || amount <= 0) return { success: false, error: "Deposit amount must be positive" };
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const last = await tx.cashBox.findFirst({ orderBy: { createdAt: 'desc' } });
+      const prevBal = last ? last.runningBalance : 0.0;
+      const entry = await tx.cashBox.create({
+        data: {
+          type: 'DEPOSIT',
+          amount: parseFloat(amount),
+          description: description || 'Cash deposit',
+          referenceType: referenceType || null,
+          referenceId: referenceId || null,
+          runningBalance: prevBal + parseFloat(amount)
+        }
+      });
+      return { success: true, data: entry };
+    });
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function cashBoxWithdraw(data) {
+  const { amount, description, referenceType, referenceId } = data;
+  if (!amount || amount <= 0) return { success: false, error: "Withdrawal amount must be positive" };
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const last = await tx.cashBox.findFirst({ orderBy: { createdAt: 'desc' } });
+      const prevBal = last ? last.runningBalance : 0.0;
+      if (prevBal < parseFloat(amount)) {
+        return { success: false, error: `Insufficient Cash Box balance. Available: ${prevBal}` };
+      }
+      const entry = await tx.cashBox.create({
+        data: {
+          type: 'WITHDRAWAL',
+          amount: parseFloat(amount),
+          description: description || 'Cash withdrawal',
+          referenceType: referenceType || null,
+          referenceId: referenceId || null,
+          runningBalance: prevBal - parseFloat(amount)
+        }
+      });
+      return { success: true, data: entry };
+    });
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function getCashBoxBalance() {
+  try {
+    const last = await prisma.cashBox.findFirst({ orderBy: { createdAt: 'desc' } });
+    const balance = last ? last.runningBalance : 0.0;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+    const todayDeposits = await prisma.cashBox.aggregate({
+      _sum: { amount: true },
+      where: { type: 'DEPOSIT', date: { gte: today, lt: tomorrow } }
+    });
+    const todayWithdrawals = await prisma.cashBox.aggregate({
+      _sum: { amount: true },
+      where: { type: 'WITHDRAWAL', date: { gte: today, lt: tomorrow } }
+    });
+    return {
+      success: true,
+      data: {
+        balance,
+        todayDeposits: todayDeposits._sum.amount || 0,
+        todayWithdrawals: todayWithdrawals._sum.amount || 0
+      }
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function getCashBoxTransactions() {
+  try {
+    const txs = await prisma.cashBox.findMany({ orderBy: { date: 'desc' }, take: 50 });
+    return { success: true, data: txs };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -591,13 +776,15 @@ async function receiveCustomerPayment(payload) {
 // --- Phase 4: POS Sales Billing (FIFO Costing Engine) ---
 
 async function createSale(payload) {
-  const { customerId, invoiceNumber, discount, netAmount, paidAmount, paymentMethod, items } = payload;
+  const { customerId, invoiceNumber, discount, netAmount, paidAmount, paymentMethod, items, addons } = payload;
   if (!items || items.length === 0) return { success: false, error: "Sale must contain items." };
 
   const disc = parseFloat(discount) || 0.0;
   const net = parseFloat(netAmount) || 0.0;
   const paid = parseFloat(paidAmount) || 0.0;
-  const unpaid = net - paid;
+
+  const addonsTotal = (addons || []).reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+  const saleRevenueExAddons = net - addonsTotal;
 
   try {
     const result = await prisma.$transaction(async (tx) => {
@@ -615,6 +802,8 @@ async function createSale(payload) {
         }
       });
 
+      const productNames = [];
+
       // 2. Deduct from user-selected batch (no auto FIFO)
       for (const item of items) {
         const prod = await tx.product.findUnique({ where: { id: item.productId } });
@@ -626,6 +815,8 @@ async function createSale(payload) {
 
         const isBag = (item.unit || '').toLowerCase() === 'bag';
         const saleQtyInKg = isBag ? item.quantity * BAG_TO_KG : item.quantity;
+        const lineQtyDisplay = isBag ? (saleQtyInKg / BAG_TO_KG) : saleQtyInKg;
+        productNames.push(`${prod.name} (${lineQtyDisplay} ${item.unit})`);
 
         const batch = await tx.productBatch.findUnique({ where: { id: item.batchId } });
         if (!batch || batch.productId !== item.productId) {
@@ -668,50 +859,94 @@ async function createSale(payload) {
         });
       }
 
-      // 3. Customer Khata Updates (if credit or partial cash)
+      // Save addons
+      const addonNames = [];
+      if (addons && Array.isArray(addons) && addons.length > 0) {
+        for (const a of addons) {
+          await tx.saleAddon.create({
+            data: {
+              saleId: sale.id,
+              title: a.name || 'Extra Charge',
+              amount: parseFloat(a.amount) || 0
+            }
+          });
+          if (a.name) addonNames.push(`${a.name} (Rs.${parseFloat(a.amount).toLocaleString()})`);
+        }
+      }
+
+      // Build description for audit trail
+      const descParts = [];
+      if (productNames.length > 0) descParts.push(`Items: ${productNames.join(', ')}`);
+      if (addonNames.length > 0) descParts.push(`Addons: ${addonNames.join(', ')}`);
+      const fullDescription = descParts.length > 0 ? descParts.join(' | ') : `Invoice ${invoiceNumber}`;
+
+      const isCashOrBank = paymentMethod === 'CASH' || paymentMethod === 'BANK';
+
+      // 3. Khata/Credit handling for customers
       if (customerId) {
-        // Record total invoice debt
         const customer = await tx.customer.findUnique({ where: { id: customerId } });
-        const postSaleBal = customer.balance + net;
 
-        await tx.customer.update({
-          where: { id: customerId },
-          data: { balance: postSaleBal }
-        });
-
-        await tx.ledgerEntry.create({
-          data: {
-            customerId,
-            description: `Sale Invoice: ${invoiceNumber}`,
-            type: "DEBIT",
-            amount: net,
-            runningBalance: postSaleBal,
-            saleId: sale.id
-          }
-        });
-
-        // Record cash payment credit if paid anything
-        if (paid > 0) {
-          const postPayBal = postSaleBal - paid;
+        if (paymentMethod === 'CREDIT') {
+          // CREDIT: DEBIT full netAmount to Khata, paidAmount goes to Cash Box
+          const postSaleBal = customer.balance + net;
           await tx.customer.update({
             where: { id: customerId },
-            data: { balance: postPayBal }
+            data: { balance: postSaleBal }
           });
-
           await tx.ledgerEntry.create({
             data: {
               customerId,
-              description: `Cash payment on Invoice ${invoiceNumber}`,
-              type: "CREDIT",
-              amount: paid,
-              runningBalance: postPayBal,
+              description: fullDescription,
+              type: "DEBIT",
+              amount: net,
+              runningBalance: postSaleBal,
+              saleId: sale.id
+            }
+          });
+        } else if (isCashOrBank) {
+          // CASH/BANK with a customer: informational ledger entry, no balance change
+          await tx.ledgerEntry.create({
+            data: {
+              customerId,
+              description: `${paymentMethod === 'CASH' ? 'Cash' : 'Bank'} sale: ${fullDescription}`,
+              type: "SALE",
+              amount: net,
+              runningBalance: customer.balance,
               saleId: sale.id
             }
           });
         }
+      } else if (isCashOrBank) {
+        // CASH/BANK without customer: general audit ledger entry (no customerId)
+        await tx.ledgerEntry.create({
+          data: {
+            customerId: null,
+            description: `Cash sale ${invoiceNumber}: ${fullDescription}`,
+            type: "SALE",
+            amount: net,
+            runningBalance: 0,
+            saleId: sale.id
+          }
+        });
       }
 
-      // 4. Main Branch adjustments
+      // 4. Cash Box deposit for CASH/BANK payments
+      if (isCashOrBank && paid > 0) {
+        const lastCb = await tx.cashBox.findFirst({ orderBy: { createdAt: 'desc' } });
+        const prevBal = lastCb ? lastCb.runningBalance : 0.0;
+        await tx.cashBox.create({
+          data: {
+            type: 'DEPOSIT',
+            amount: paid,
+            description: `Sale ${invoiceNumber} - ${paymentMethod === 'CASH' ? 'Cash' : 'Bank'} payment received`,
+            referenceType: 'SALE',
+            referenceId: sale.id,
+            runningBalance: prevBal + paid
+          }
+        });
+      }
+
+      // 5. Main Branch adjustments
       if (paymentMethod === 'MAIN_BRANCH') {
         const lastTx = await tx.mainBranchTransaction.findFirst({ orderBy: { createdAt: 'desc' } });
         const currentPayable = lastTx ? lastTx.runningPayable : 0.0;
@@ -744,7 +979,7 @@ async function createSale(payload) {
 async function getRecipes() {
   const recipes = await prisma.recipe.findMany({
     include: {
-      product: { select: { name: true, unit: true } },
+      product: { select: { name: true, unit: true, defaultPrice: true, loyalPrice: true } },
       recipeItems: { include: { product: { select: { name: true, unit: true } } } }
     }
   });
@@ -752,7 +987,7 @@ async function getRecipes() {
 }
 
 async function createRecipe(payload) {
-  const { productId, name, outputQuantity, items } = payload;
+  const { productId, name, items } = payload;
 
   if (!productId) {
     return { success: false, error: "Select the finished product this recipe produces." };
@@ -771,17 +1006,24 @@ async function createRecipe(payload) {
     return { success: false, error: "Selected output product was not found." };
   }
 
+  // Auto-calculate total formula weight from ingredient quantities (all in kg)
+  const totalWeightKg = validItems.reduce((sum, i) => sum + (parseFloat(i.quantity) || 0), 0);
+
+  if (totalWeightKg <= 0) {
+    return { success: false, error: "Total ingredient weight must be greater than zero." };
+  }
+
   try {
     const recipe = await prisma.recipe.create({
       data: {
         productId,
         name: name || "Formula Mix Recipe",
-        outputQuantity: parseFloat(outputQuantity) || 1.0,
+        outputQuantity: totalWeightKg,
         recipeItems: {
           create: validItems.map(item => ({
             productId: item.productId,
             quantity: parseFloat(item.quantity) || 0.0,
-            unit: item.unit || "kg"
+            unit: "kg"
           }))
         }
       }
@@ -796,7 +1038,7 @@ async function createRecipe(payload) {
 }
 
 async function executeProduction(payload) {
-  const { productId, quantityProduced, recipeId } = payload;
+  const { productId, quantityProduced, recipeId, extraCost } = payload;
   const qtyProduced = parseFloat(quantityProduced) || 0.0;
   if (qtyProduced <= 0) return { success: false, error: "Production quantity must be positive." };
 
@@ -810,9 +1052,11 @@ async function executeProduction(payload) {
 
       let totalIngredientsCost = 0.0;
 
+      const scaleFactor = qtyProduced / recipe.outputQuantity;
+
       // 1. Loop and deduct recipe ingredients FIFO style
       for (const ing of recipe.recipeItems) {
-        const totalNeededKg = ing.quantity * qtyProduced;
+        const totalNeededKg = ing.quantity * scaleFactor;
 
         // Fetch active stock batches of ingredient
         const activeBatches = await tx.productBatch.findMany({
@@ -859,26 +1103,27 @@ async function executeProduction(payload) {
       }
 
       // 2. Calculate actual costing per produced unit
-      const unitCostPrice = totalIngredientsCost / qtyProduced;
+      const extraCostVal = parseFloat(extraCost) || 0;
+      const ingredientCost = totalIngredientsCost;
+      const totalCost = ingredientCost + extraCostVal;
+      const costPerKg = totalCost / qtyProduced;
 
-      // 3. Create manufactured batch
+      // 3. Create manufactured batch (always store in KG)
       const targetProd = await tx.product.findUnique({ where: { id: productId } });
       const cleanName = targetProd.name.replace(/[^a-zA-Z]/g, '').slice(0, 4).toUpperCase();
       const batchNo = `BAT-MFG-${cleanName}-${Date.now().toString().slice(-6)}`;
 
-      const isBag = targetProd.unit === 'bag';
-      const outputQtyInKg = isBag ? qtyProduced * BAG_TO_KG : qtyProduced;
-      // If output is bags, costPrice in base kg is:
-      const costPriceInKg = isBag ? (unitCostPrice / BAG_TO_KG) : unitCostPrice;
+      const isBagProduct = targetProd.unit === 'bag';
+      const sellingPricePerKg = isBagProduct ? (targetProd.defaultPrice / BAG_TO_KG) : targetProd.defaultPrice;
 
-      // Create manufactured product batch
+      // Create manufactured product batch (quantity in kg always)
       const newBatch = await tx.productBatch.create({
         data: {
           productId,
           batchNumber: batchNo,
-          quantity: outputQtyInKg,
-          initialQuantity: outputQtyInKg,
-          costPrice: costPriceInKg
+          quantity: qtyProduced,
+          initialQuantity: qtyProduced,
+          costPrice: costPerKg
         }
       });
 
@@ -888,7 +1133,7 @@ async function executeProduction(payload) {
           productId,
           batchId: newBatch.id,
           type: "PRODUCTION_OUTPUT",
-          quantity: outputQtyInKg,
+          quantity: qtyProduced,
           unit: "kg",
           description: `Produced recipe: ${recipe.name}`
         }
@@ -901,8 +1146,11 @@ async function executeProduction(payload) {
           recipeId,
           batchNumber: batchNo,
           quantityProduced: qtyProduced,
-          costPerUnit: unitCostPrice, // per unit
-          totalCost: totalIngredientsCost
+          ingredientCost: ingredientCost,
+          extraCost: extraCostVal,
+          totalCost: totalCost,
+          costPerUnit: costPerKg,
+          sellingPricePerKg: sellingPricePerKg
         }
       });
 
@@ -912,9 +1160,9 @@ async function executeProduction(payload) {
           data: {
             productionId: production.id,
             productId: ing.productId,
-            batchId: newBatch.id, // linked batch
-            quantityConsumed: ing.quantity * qtyProduced,
-            costPrice: unitCostPrice
+            batchId: newBatch.id,
+            quantityConsumed: ing.quantity * scaleFactor,
+            costPrice: costPerKg
           }
         });
       }
@@ -1077,6 +1325,498 @@ async function getReportsData(filters) {
   };
 }
 
+// --- Edit & Delete Handlers ---
+
+async function updateCustomer(data) {
+  const { id, name, phone, address, isLoyal, isMainBranchCustomer } = data;
+  if (!id || !name) return { success: false, error: "Customer ID and Name are required" };
+  try {
+    const updated = await prisma.customer.update({
+      where: { id },
+      data: {
+        name: name.trim(),
+        phone: phone || null,
+        address: address || null,
+        isLoyal: !!isLoyal,
+        isMainBranchCustomer: !!isMainBranchCustomer
+      }
+    });
+    return { success: true, data: updated };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function deleteCustomer(data) {
+  const { id } = data;
+  if (!id) return { success: false, error: "Customer ID is required" };
+  try {
+    const customer = await prisma.customer.findUnique({ where: { id } });
+    if (!customer) return { success: false, error: "Customer not found." };
+
+    // LedgerEntry has onDelete: Cascade, so entries auto-delete with customer
+    // Sale has onDelete: SetNull on customerId, so sales are unlinked automatically
+    await prisma.customer.delete({ where: { id } });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function updateProduct(data) {
+  const { id, name, sku, category, type, unit, defaultPrice, loyalPrice, lowStockAlert } = data;
+  if (!id || !name) return { success: false, error: "Product ID and Name are required" };
+  try {
+    if (sku) {
+      const existing = await prisma.product.findFirst({ where: { sku: sku.trim(), NOT: { id } } });
+      if (existing) return { success: false, error: `SKU '${sku}' already in use` };
+    }
+    const updated = await prisma.product.update({
+      where: { id },
+      data: {
+        name: name.trim(),
+        sku: sku || null,
+        category: category || "Other",
+        type: type || "RAW_MATERIAL",
+        unit: unit || "kg",
+        defaultPrice: parseFloat(defaultPrice) || 0.0,
+        loyalPrice: parseFloat(loyalPrice) || 0.0,
+        lowStockAlert: parseFloat(lowStockAlert) || 0.0
+      }
+    });
+    return { success: true, data: updated };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function deleteProduct(data) {
+  const { id } = data;
+  if (!id) return { success: false, error: "Product ID is required" };
+  try {
+    const product = await prisma.product.findUnique({ where: { id } });
+    if (!product) return { success: false, error: "Product not found." };
+
+    const batchCount = await prisma.productBatch.count({ where: { productId: id } });
+    if (batchCount > 0) return { success: false, error: "Cannot delete product with existing stock batches. Remove batches first." };
+
+    const saleCount = await prisma.saleItem.count({ where: { productId: id } });
+    if (saleCount > 0) return { success: false, error: "Cannot delete product linked to sale records." };
+
+    const purchaseCount = await prisma.purchaseItem.count({ where: { productId: id } });
+    if (purchaseCount > 0) return { success: false, error: "Cannot delete product linked to purchase records." };
+
+    const recipeCount = await prisma.recipeItem.count({ where: { productId: id } });
+    if (recipeCount > 0) return { success: false, error: "Cannot delete product used in manufacturing recipes." };
+
+    await prisma.product.delete({ where: { id } });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function deleteSale(data) {
+  const { id, invoiceNumber } = data;
+  const saleId = id || invoiceNumber;
+  const whereClause = id ? { id: saleId } : { invoiceNumber: saleId };
+  if (!saleId) return { success: false, error: "Sale ID or Invoice Number is required" };
+  try {
+    await prisma.$transaction(async (tx) => {
+      const sale = await tx.sale.findUnique({ where: whereClause, include: { saleItems: true } });
+      if (!sale) throw new Error("Sale not found");
+
+      // Restore stock to batches
+      for (const item of sale.saleItems) {
+        if (item.batchId) {
+          const isBag = item.unit === 'bag';
+          const qtyInKg = isBag ? item.quantity * BAG_TO_KG : item.quantity;
+          await tx.productBatch.update({
+            where: { id: item.batchId },
+            data: { quantity: { increment: qtyInKg } }
+          });
+        }
+      }
+
+      // Reverse customer ledger entries
+      if (sale.customerId) {
+        const ledgerEntries = await tx.ledgerEntry.findMany({ where: { saleId: sale.id }, orderBy: { createdAt: 'asc' } });
+        for (const entry of ledgerEntries) {
+          if (entry.type === 'DEBIT') {
+            await tx.customer.update({
+              where: { id: sale.customerId },
+              data: { balance: { decrement: entry.amount } }
+            });
+          } else if (entry.type === 'CREDIT') {
+            await tx.customer.update({
+              where: { id: sale.customerId },
+              data: { balance: { increment: entry.amount } }
+            });
+          }
+        }
+        await tx.ledgerEntry.deleteMany({ where: { saleId: sale.id } });
+      } else {
+        // Non-customer sales: delete ledger entries
+        await tx.ledgerEntry.deleteMany({ where: { saleId: sale.id } });
+      }
+
+      // Reverse Cash Box entries for this sale
+      const cbEntries = await tx.cashBox.findMany({ where: { referenceType: 'SALE', referenceId: sale.id }, orderBy: { createdAt: 'asc' } });
+      if (cbEntries.length > 0) {
+        for (const cb of cbEntries) {
+          // Remove the deposit and recalculate balances
+          const lastBefore = await tx.cashBox.findFirst({
+            where: { createdAt: { lt: cb.createdAt } },
+            orderBy: { createdAt: 'desc' }
+          });
+          const balBefore = lastBefore ? lastBefore.runningBalance : 0.0;
+          // Create reversal entry
+          await tx.cashBox.create({
+            data: {
+              type: 'WITHDRAWAL',
+              amount: cb.amount,
+              description: `Reversal of sale ${sale.invoiceNumber}`,
+              referenceType: 'SALE_REVERSAL',
+              referenceId: sale.id,
+              runningBalance: balBefore
+            }
+          });
+        }
+        // Delete original Cash Box entries
+        await tx.cashBox.deleteMany({ where: { referenceType: 'SALE', referenceId: sale.id } });
+      }
+
+      // Reverse main branch transactions
+      if (sale.paymentMethod === 'MAIN_BRANCH') {
+        const lastTx = await tx.mainBranchTransaction.findFirst({ orderBy: { createdAt: 'desc' } });
+        const currentPayable = lastTx ? lastTx.runningPayable : 0.0;
+        await tx.mainBranchTransaction.create({
+          data: {
+            type: "PAYABLE_INCREASE",
+            amount: sale.netAmount,
+            description: `Reversal of sale ${sale.invoiceNumber}`,
+            runningPayable: currentPayable + sale.netAmount
+          }
+        });
+      }
+
+      // Delete sale items and stock movements
+      await tx.stockMovement.deleteMany({
+        where: { type: "SALE", description: { contains: sale.invoiceNumber } }
+      });
+      await tx.saleItem.deleteMany({ where: { saleId: sale.id } });
+      await tx.saleAddon.deleteMany({ where: { saleId: sale.id } });
+      await tx.sale.delete({ where: { id: sale.id } });
+    });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function deleteLedgerEntry(data) {
+  const { id } = data;
+  if (!id) return { success: false, error: "Entry ID is required" };
+  try {
+    await prisma.$transaction(async (tx) => {
+      const entry = await tx.ledgerEntry.findUnique({ where: { id } });
+      if (!entry) throw new Error("Ledger entry not found");
+
+      // Reverse balance effect on customer if customer still exists
+      if (entry.customerId) {
+        const customer = await tx.customer.findUnique({ where: { id: entry.customerId } });
+        if (customer) {
+          const balanceAdjustment = entry.type === 'DEBIT' ? -entry.amount : entry.amount;
+          await tx.customer.update({
+            where: { id: entry.customerId },
+            data: { balance: { increment: balanceAdjustment } }
+          });
+        }
+      }
+
+      await tx.ledgerEntry.delete({ where: { id } });
+
+      // Recalculate running balances for remaining entries
+      if (entry.customerId) {
+        const remaining = await tx.ledgerEntry.findMany({
+          where: { customerId: entry.customerId },
+          orderBy: { date: 'asc', createdAt: 'asc' }
+        });
+        let runningBal = 0;
+        for (const rem of remaining) {
+          runningBal += rem.type === 'DEBIT' ? rem.amount : -rem.amount;
+          await tx.ledgerEntry.update({ where: { id: rem.id }, data: { runningBalance: runningBal } });
+        }
+      }
+    });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function deleteBatch(data) {
+  const { id } = data;
+  if (!id) return { success: false, error: "Batch ID is required" };
+  try {
+    const batch = await prisma.productBatch.findUnique({ where: { id } });
+    if (!batch) return { success: false, error: "Batch not found" };
+
+    const saleItemCount = await prisma.saleItem.count({ where: { batchId: id } });
+    if (saleItemCount > 0) {
+      return { success: false, error: "Cannot delete batch linked to sale records. Delete the sale invoices first." };
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Reverse any production consumption that used this batch as ingredient
+      const prodItems = await tx.productionItem.findMany({ where: { batchId: id } });
+      for (const pi of prodItems) {
+        // Restore consumed quantity back to this batch
+        await tx.productBatch.update({
+          where: { id },
+          data: { quantity: { increment: pi.quantityConsumed } }
+        });
+        // Create reversal stock movement
+        await tx.stockMovement.create({
+          data: {
+            productId: pi.productId,
+            batchId: id,
+            type: "PRODUCTION_CONSUMPTION_REVERSAL",
+            quantity: pi.quantityConsumed,
+            unit: "kg",
+            description: `Reversed consumption: batch ${batch.batchNumber} deleted`
+          }
+        });
+        // Remove the production item link
+        await tx.productionItem.delete({ where: { id: pi.id } });
+      }
+
+      await tx.stockMovement.deleteMany({ where: { batchId: id } });
+      await tx.productBatch.delete({ where: { id } });
+    });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function updateRecipe(data) {
+  const { id, name, items } = data;
+  if (!id) return { success: false, error: "Recipe ID is required" };
+  try {
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (items && items.length > 0) {
+      const validItems = items.filter(i => i.productId && parseFloat(i.quantity) > 0);
+      const totalWeightKg = validItems.reduce((sum, i) => sum + (parseFloat(i.quantity) || 0), 0);
+      updateData.outputQuantity = totalWeightKg > 0 ? totalWeightKg : 1;
+
+      // Delete existing items and recreate
+      await prisma.recipeItem.deleteMany({ where: { recipeId: id } });
+      await prisma.recipe.update({
+        where: { id },
+        data: {
+          ...updateData,
+          recipeItems: {
+            create: validItems.map(item => ({
+              productId: item.productId,
+              quantity: parseFloat(item.quantity) || 0,
+              unit: "kg"
+            }))
+          }
+        }
+      });
+    } else {
+      await prisma.recipe.update({ where: { id }, data: updateData });
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function deleteRecipe(data) {
+  const { id } = data;
+  if (!id) return { success: false, error: "Recipe ID is required" };
+  try {
+    const recipe = await prisma.recipe.findUnique({ where: { id } });
+    if (!recipe) return { success: false, error: "Recipe not found." };
+    const prodCount = await prisma.production.count({ where: { recipeId: id } });
+    if (prodCount > 0) {
+      await prisma.production.updateMany({ where: { recipeId: id }, data: { recipeId: null } });
+    }
+    await prisma.recipeItem.deleteMany({ where: { recipeId: id } });
+    await prisma.recipe.delete({ where: { id } });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function updateExpense(data) {
+  const { id, category, amount, description, date } = data;
+  if (!id) return { success: false, error: "Expense ID is required" };
+  try {
+    const updated = await prisma.expense.update({
+      where: { id },
+      data: {
+        category: category || undefined,
+        amount: amount ? parseFloat(amount) : undefined,
+        description: description !== undefined ? description : undefined,
+        date: date ? new Date(date) : undefined
+      }
+    });
+    return { success: true, data: updated };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function deleteExpense(data) {
+  const { id } = data;
+  if (!id) return { success: false, error: "Expense ID is required" };
+  try {
+    const existing = await prisma.expense.findUnique({ where: { id } });
+    if (!existing) return { success: false, error: "Expense not found." };
+    await prisma.expense.delete({ where: { id } });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// --- Extra Addons ---
+
+async function createSaleAddons(data) {
+  const { saleId, addons } = data;
+  if (!saleId || !addons || !Array.isArray(addons)) return { success: false, error: "Sale ID and addons array required" };
+  try {
+    const created = [];
+    for (const addon of addons) {
+      const a = await prisma.saleAddon.create({
+        data: {
+          saleId,
+          title: addon.title || "Extra Charge",
+          amount: parseFloat(addon.amount) || 0
+        }
+      });
+      created.push(a);
+    }
+    return { success: true, data: created };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// --- Partner Withdrawals ---
+
+async function getPartnerWithdrawals() {
+  try {
+    const withdrawals = await prisma.partnerWithdrawal.findMany({ orderBy: { createdAt: 'desc' } });
+    return { success: true, data: withdrawals };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function createPartnerWithdrawal(data) {
+  const { partnerName, amount, note } = data;
+  if (!partnerName || !amount) return { success: false, error: "Partner name and amount required" };
+  try {
+    const w = await prisma.partnerWithdrawal.create({
+      data: {
+        partnerName,
+        amount: parseFloat(amount),
+        note: note || null
+      }
+    });
+    return { success: true, data: w };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function deletePartnerWithdrawal(data) {
+  const { id } = data;
+  if (!id) return { success: false, error: "ID required" };
+  try {
+    const existing = await prisma.partnerWithdrawal.findUnique({ where: { id } });
+    if (!existing) return { success: false, error: "Withdrawal not found." };
+    await prisma.partnerWithdrawal.delete({ where: { id } });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// --- Daily Profit ---
+
+async function getDailyProfit() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  try {
+    const todaySales = await prisma.sale.aggregate({
+      _sum: { netAmount: true, discount: true },
+      where: { saleDate: { gte: today, lt: tomorrow } }
+    });
+
+    const todaySaleItems = await prisma.saleItem.findMany({
+      where: { sale: { saleDate: { gte: today, lt: tomorrow } } },
+      select: { quantity: true, sellingPrice: true, costPrice: true, saleId: true }
+    });
+
+    let todayRevenue = 0;
+    let todayCOGS = 0;
+    for (const item of todaySaleItems) {
+      todayRevenue += item.quantity * item.sellingPrice;
+      todayCOGS += item.quantity * item.costPrice;
+    }
+
+    const todayExpenses = await prisma.expense.aggregate({
+      _sum: { amount: true },
+      where: { date: { gte: today, lt: tomorrow } }
+    });
+
+    const salesTotal = todaySales._sum.netAmount || 0;
+    const grossProfit = todayRevenue - todayCOGS;
+
+    console.log(`[DailyProfit] rev=${todayRevenue} cogs=${todayCOGS} gross=${grossProfit} sales=${salesTotal} items=${todaySaleItems.length}`);
+    const expensesTotal = todayExpenses._sum.amount || 0;
+    const netProfit = grossProfit - expensesTotal;
+
+    const sohaibTotal = await prisma.partnerWithdrawal.aggregate({
+      _sum: { amount: true },
+      where: { partnerName: { contains: 'sohaib', mode: 'insensitive' } }
+    });
+    const tayyabTotal = await prisma.partnerWithdrawal.aggregate({
+      _sum: { amount: true },
+      where: { partnerName: { contains: 'tayyab', mode: 'insensitive' } }
+    });
+    const aqibTotal = await prisma.partnerWithdrawal.aggregate({
+      _sum: { amount: true },
+      where: { partnerName: { contains: 'aqib', mode: 'insensitive' } }
+    });
+
+    return {
+      success: true,
+      data: {
+        todaySales: salesTotal,
+        todayGrossProfit: grossProfit,
+        todayNetProfit: netProfit,
+        todayExpenses: expensesTotal,
+        sohaibWithdrawn: sohaibTotal._sum.amount || 0,
+        tayyabWithdrawn: tayyabTotal._sum.amount || 0,
+        aqibWithdrawn: aqibTotal._sum.amount || 0
+      }
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
 // Reset Database Utility
 async function resetDatabase() {
   try {
@@ -1096,7 +1836,10 @@ async function resetDatabase() {
       prisma.customer.deleteMany(),
       prisma.supplier.deleteMany(),
       prisma.expense.deleteMany(),
-      prisma.mainBranchTransaction.deleteMany()
+      prisma.mainBranchTransaction.deleteMany(),
+      prisma.saleAddon.deleteMany(),
+      prisma.partnerWithdrawal.deleteMany(),
+      prisma.cashBox.deleteMany()
     ]);
     return { success: true };
   } catch (err) {

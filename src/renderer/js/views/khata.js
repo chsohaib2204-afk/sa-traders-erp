@@ -48,10 +48,16 @@ export default class KhataView extends BaseView {
           </div>
           
           ${this.ledgerData ? `
-            <button id="btn-print-ledger" class="px-5 py-2.5 bg-slate-700 hover:bg-slate-600 border border-slate-600/30 text-slate-100 rounded-xl font-semibold flex items-center gap-2 transition-active">
-              <svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path></svg>
-              Print Statement
-            </button>
+            <div class="flex gap-2">
+              <button id="btn-print-ledger" class="px-5 py-2.5 bg-slate-700 hover:bg-slate-600 border border-slate-600/30 text-slate-100 rounded-xl font-semibold flex items-center gap-2 transition-active">
+                <svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path></svg>
+                Print Statement
+              </button>
+              <button id="btn-image-ledger" class="px-5 py-2.5 bg-emerald-700 hover:bg-emerald-600 border border-emerald-600/30 text-slate-100 rounded-xl font-semibold flex items-center gap-2 transition-active">
+                <svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                Save as Image
+              </button>
+            </div>
           ` : ''}
         </div>
 
@@ -86,17 +92,18 @@ export default class KhataView extends BaseView {
                   <table class="w-full text-left text-xs border-collapse">
                     <thead>
                       <tr class="border-b border-slate-700/60 text-slate-400 font-semibold uppercase tracking-wider bg-darkbg-900/20">
-                        <th class="py-3 px-4">Date</th>
-                        <th class="py-3 px-4">Description</th>
-                        <th class="py-3 px-4 text-right">Debit (Owed)</th>
-                        <th class="py-3 px-4 text-right">Credit (Paid)</th>
-                        <th class="py-3 px-4 text-right">Running Balance</th>
+                        <th class="py-3 px-4 w-[100px]">Date</th>
+                        <th class="py-3 px-4 w-auto">Description</th>
+                        <th class="py-3 px-4 text-right w-[120px]">Debit (Owed)</th>
+                        <th class="py-3 px-4 text-right w-[120px]">Credit (Paid)</th>
+                        <th class="py-3 px-4 text-right w-[130px]">Running Balance</th>
+                        <th class="py-3 px-4 text-right w-[70px]">Actions</th>
                       </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-700/30 text-slate-300">
                       ${this.ledgerData.ledger.length === 0 ? `
                         <tr>
-                          <td colspan="5" class="py-8 text-center text-slate-500">No ledger entries logged for this account.</td>
+                          <td colspan="6" class="py-8 text-center text-slate-500">No ledger entries logged for this account.</td>
                         </tr>
                       ` : this.ledgerData.ledger.map(entry => {
                         const formattedDate = new Date(entry.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -105,7 +112,7 @@ export default class KhataView extends BaseView {
                         return `
                           <tr class="hover:bg-slate-700/10">
                             <td class="py-3 px-4 text-slate-400 font-mono">${formattedDate}</td>
-                            <td class="py-3 px-4 font-semibold text-slate-200">${entry.description}</td>
+                            <td class="py-3 px-4 font-semibold text-slate-200 break-words max-w-[300px]" title="${entry.description.replace(/"/g, '&quot;')}">${entry.description}</td>
                             <td class="py-3 px-4 text-right ${isDebit ? 'font-bold text-rose-400' : 'text-slate-500'}">
                               ${isDebit ? formatPKR(entry.amount) : '--'}
                             </td>
@@ -114,6 +121,9 @@ export default class KhataView extends BaseView {
                             </td>
                             <td class="py-3 px-4 text-right font-bold ${entry.runningBalance > 0 ? 'text-slate-300' : 'text-emerald-400'}">
                               ${formatPKR(entry.runningBalance)}
+                            </td>
+                            <td class="py-3 px-4 text-right">
+                              <button data-delete-entry-id="${entry.id}" class="px-2 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/10 rounded text-[10px] font-semibold transition-active">Delete</button>
                             </td>
                           </tr>
                         `;
@@ -165,6 +175,8 @@ export default class KhataView extends BaseView {
     if (this.ledgerData) {
       this.setupPaymentCollection();
       this.setupPrintStatement();
+      this.setupSaveAsImage();
+      this.setupDeleteLedgerEntry();
     }
   }
 
@@ -251,6 +263,57 @@ export default class KhataView extends BaseView {
         </html>
       `);
       printWindow.document.close();
+    });
+  }
+
+  setupSaveAsImage() {
+    const btn = document.getElementById('btn-image-ledger');
+    if (!btn) return;
+
+    btn.addEventListener('click', async () => {
+      const element = document.getElementById('printable-ledger-area');
+      if (!element) return;
+
+      try {
+        btn.disabled = true;
+        btn.innerText = 'Generating Image...';
+
+        const canvas = await html2canvas(element, {
+          scale: 2,
+          backgroundColor: '#ffffff',
+          logging: false,
+          useCORS: true
+        });
+
+        const link = document.createElement('a');
+        const customerName = this.ledgerData.customer.name.replace(/[^a-zA-Z0-9]/g, '_');
+        link.download = `Ledger_${customerName}_${new Date().toISOString().split('T')[0]}.png`;
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+
+        btn.disabled = false;
+        btn.innerText = 'Save as Image';
+      } catch (err) {
+        console.error('Image export failed:', err);
+        alert('Failed to generate image. Check console for details.');
+        btn.disabled = false;
+        btn.innerText = 'Save as Image';
+      }
+    });
+  }
+
+  setupDeleteLedgerEntry() {
+    this.container.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-delete-entry-id]');
+      if (!btn) return;
+      if (!confirm('Delete this ledger entry? This will recalculate the customer balance.')) return;
+      const id = btn.getAttribute('data-delete-entry-id');
+      const res = await API.deleteLedgerEntry({ id });
+      if (res.success) {
+        await this.mount(this.container);
+      } else {
+        alert(res.error || 'Failed to delete ledger entry.');
+      }
     });
   }
 }

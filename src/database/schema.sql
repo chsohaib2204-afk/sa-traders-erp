@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS "Customer" (
 
 CREATE TABLE IF NOT EXISTS "LedgerEntry" (
     "id" TEXT NOT NULL PRIMARY KEY,
-    "customerId" TEXT NOT NULL,
+    "customerId" TEXT,
     "date" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "description" TEXT NOT NULL,
     "type" TEXT NOT NULL,
@@ -152,8 +152,11 @@ CREATE TABLE IF NOT EXISTS "Production" (
     "recipeId" TEXT,
     "batchNumber" TEXT NOT NULL,
     "quantityProduced" REAL NOT NULL,
-    "costPerUnit" REAL NOT NULL,
+    "ingredientCost" REAL NOT NULL DEFAULT 0,
+    "extraCost" REAL NOT NULL DEFAULT 0,
     "totalCost" REAL NOT NULL,
+    "costPerUnit" REAL NOT NULL,
+    "sellingPricePerKg" REAL NOT NULL DEFAULT 0,
     "productionDate" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL
@@ -209,7 +212,39 @@ CREATE TABLE IF NOT EXISTS "StockMovement" (
     CONSTRAINT "StockMovement_batchId_fkey" FOREIGN KEY ("batchId") REFERENCES "ProductBatch" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS "SaleAddon" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "saleId" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "amount" REAL NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "SaleAddon_saleId_fkey" FOREIGN KEY ("saleId") REFERENCES "Sale" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "CashBox" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "date" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "type" TEXT NOT NULL,
+    "amount" REAL NOT NULL,
+    "description" TEXT NOT NULL,
+    "referenceType" TEXT,
+    "referenceId" TEXT,
+    "runningBalance" REAL NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS "PartnerWithdrawal" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "partnerName" TEXT NOT NULL,
+    "amount" REAL NOT NULL,
+    "note" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS "Product_sku_key" ON "Product"("sku");
+
 CREATE UNIQUE INDEX IF NOT EXISTS "ProductBatch_batchNumber_key" ON "ProductBatch"("batchNumber");
+
 CREATE UNIQUE INDEX IF NOT EXISTS "Sale_invoiceNumber_key" ON "Sale"("invoiceNumber");
+
 CREATE UNIQUE INDEX IF NOT EXISTS "Recipe_productId_key" ON "Recipe"("productId");

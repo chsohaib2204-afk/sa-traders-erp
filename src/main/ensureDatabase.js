@@ -6,16 +6,6 @@ async function ensureDatabaseSchema() {
   const prisma = new PrismaClient();
 
   try {
-    const tables = await prisma.$queryRawUnsafe(
-      `SELECT name FROM sqlite_master WHERE type='table' AND name='Product'`
-    );
-
-    if (Array.isArray(tables) && tables.length > 0) {
-      return;
-    }
-
-    console.log('[ERP] Database has no schema — applying schema...');
-
     const schemaPath = path.join(__dirname, '../database/schema.sql');
     const sql = fs.readFileSync(schemaPath, 'utf-8');
 
@@ -28,7 +18,23 @@ async function ensureDatabaseSchema() {
       await prisma.$executeRawUnsafe(stmt + ';');
     }
 
-    console.log('[ERP] Database schema applied successfully.');
+    // Migration: add new columns that may not exist in older databases
+    const migrations = [
+      `ALTER TABLE "Production" ADD COLUMN "ingredientCost" REAL NOT NULL DEFAULT 0`,
+      `ALTER TABLE "Production" ADD COLUMN "extraCost" REAL NOT NULL DEFAULT 0`,
+      `ALTER TABLE "Production" ADD COLUMN "sellingPricePerKg" REAL NOT NULL DEFAULT 0`,
+      `ALTER TABLE "SaleAddon" ADD COLUMN "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`,
+      `ALTER TABLE "PartnerWithdrawal" ADD COLUMN "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`
+    ];
+    for (const migration of migrations) {
+      try {
+        await prisma.$executeRawUnsafe(migration);
+      } catch (e) {
+        // Column already exists — safe to ignore
+      }
+    }
+
+    console.log('[ERP] Database schema ensured (all tables up-to-date).');
   } finally {
     await prisma.$disconnect();
   }

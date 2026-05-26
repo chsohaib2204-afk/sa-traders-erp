@@ -5,6 +5,7 @@
 export default class BaseView {
   constructor() {
     this.container = null;
+    this._cleanups = [];
   }
 
   /**
@@ -26,10 +27,29 @@ export default class BaseView {
   async postRender() {}
 
   /**
+   * Register a cleanup function to be called before the view is unmounted.
+   * @param {Function} fn
+   */
+  addCleanup(fn) {
+    this._cleanups.push(fn);
+  }
+
+  /**
+   * Clean up all registered listeners before unmount.
+   */
+  unmount() {
+    this._cleanups.forEach(fn => fn());
+    this._cleanups = [];
+  }
+
+  /**
    * Entry point to mount the controller into the active viewport.
    * @param {HTMLElement} container
    */
   async mount(container) {
+    if (this.container && this.container !== container) {
+      this.unmount();
+    }
     this.container = container;
     try {
       await this.preRender();

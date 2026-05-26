@@ -15,6 +15,7 @@ export default class SalesView extends BaseView {
     // POS Items rows — batchId chosen by user (no auto FIFO)
     this.saleRows = [{ productId: '', batchId: '', quantity: 1, sellingPrice: 0, unit: 'bag', priceType: 'default', subtotal: 0 }];
     this.discount = 0;
+    this.addons = [{ name: '', amount: 0 }];
   }
 
   async preRender() {
@@ -109,6 +110,17 @@ export default class SalesView extends BaseView {
                   </table>
                 </div>
               </div>
+
+              <!-- Extra Addons Section -->
+              <div class="pt-4 border-t border-slate-700/30 space-y-3">
+                <div class="flex justify-between items-center">
+                  <label class="text-xs font-bold text-slate-400 uppercase tracking-wider block">Extra Addons / Charges</label>
+                  <button id="btn-add-addon" type="button" class="text-xs text-brand-400 font-bold hover:underline">+ Add Charge</button>
+                </div>
+                <div id="addons-container" class="space-y-2">
+                  <!-- Dynamic addon rows rendered here -->
+                </div>
+              </div>
             </div>
           </div>
 
@@ -153,12 +165,35 @@ export default class SalesView extends BaseView {
             </div>
           </div>
         </div>
+
+        <!-- Recent Sales List -->
+        <div class="p-5 bg-darkbg-800 border border-slate-700/30 rounded-xl space-y-4">
+          <h3 class="text-sm font-bold text-slate-200 pb-3 border-b border-slate-700/40 uppercase tracking-wider">Recent Invoices</h3>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr class="border-b border-slate-700/60 text-slate-400 font-semibold uppercase tracking-wider bg-darkbg-900/20">
+                  <th class="py-3 px-4">Invoice</th>
+                  <th class="py-3 px-4">Customer</th>
+                  <th class="py-3 px-4">Date</th>
+                  <th class="py-3 px-4 text-right">Amount</th>
+                  <th class="py-3 px-4 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="recent-sales-body" class="divide-y divide-slate-700/30 text-slate-300">
+                <!-- populated dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     `;
   }
 
   async postRender() {
     this.setupPOSForm();
+    this.setupAddons();
+    this.setupRecentSalesList();
   }
 
   setupPOSForm() {
@@ -207,6 +242,9 @@ export default class SalesView extends BaseView {
       this.saleRows.forEach(row => {
         gross += row.subtotal;
       });
+
+      const addonsTotal = this.addons.reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0);
+      gross += addonsTotal;
 
       document.getElementById('pos-gross').innerText = `Rs. ${gross.toLocaleString()}`;
 
@@ -402,7 +440,9 @@ export default class SalesView extends BaseView {
       const customerId = selectCust.value;
       const paymentMethod = selectMethod.value;
       const discount = parseFloat(inputDiscount.value) || 0.0;
-      const netAmount = this.saleRows.reduce((sum, r) => sum + r.subtotal, 0) - discount;
+      const validAddons = this.addons.filter(a => a.name && parseFloat(a.amount) > 0);
+      const addonsTotal = validAddons.reduce((s, a) => s + parseFloat(a.amount), 0);
+      const netAmount = this.saleRows.reduce((sum, r) => sum + r.subtotal, 0) + addonsTotal - discount;
       const paidAmount = parseFloat(inputReceived.value) || 0.0;
 
       const validItems = this.saleRows.filter(row => row.productId && row.batchId && row.quantity > 0 && row.sellingPrice > 0);
@@ -435,7 +475,8 @@ export default class SalesView extends BaseView {
           quantity: row.quantity,
           sellingPrice: row.sellingPrice,
           unit: row.unit
-        }))
+        })),
+        addons: validAddons.map(a => ({ name: a.name, amount: parseFloat(a.amount) }))
       };
 
       btnCheckout.disabled = true;
@@ -455,5 +496,214 @@ export default class SalesView extends BaseView {
         errDiv.classList.remove('hidden');
       }
     });
+  }
+
+  setupAddons() {
+    const container = document.getElementById('addons-container');
+    const btnAdd = document.getElementById('btn-add-addon');
+    if (!container || !btnAdd) return;
+
+    const renderAddons = () => {
+      container.innerHTML = this.addons.map((a, i) => `
+        <div class="flex gap-2 items-center">
+          <input type="text" value="${a.name}" data-addon-idx="${i}" data-addon-field="name" placeholder="Charge description" class="flex-1 px-3 py-2 bg-darkbg-900 border border-slate-700 rounded text-slate-100 text-xs focus:border-brand-500 focus:outline-none">
+          <input type="number" step="any" min="0" value="${a.amount}" data-addon-idx="${i}" data-addon-field="amount" placeholder="Amount" class="w-28 px-3 py-2 bg-darkbg-900 border border-slate-700 rounded text-slate-100 text-xs font-bold text-center focus:border-brand-500 focus:outline-none">
+          <button data-remove-addon-idx="${i}" class="px-2 py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/10 rounded text-xs transition-active">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+          </button>
+        </div>
+      `).join('');
+
+      // Wire up input changes
+      container.querySelectorAll('[data-addon-idx]').forEach(el => {
+        el.addEventListener('input', (e) => {
+          const idx = parseInt(e.target.getAttribute('data-addon-idx'));
+          const field = e.target.getAttribute('data-addon-field');
+          if (field === 'name') this.addons[idx].name = e.target.value;
+          if (field === 'amount') this.addons[idx].amount = e.target.value;
+          this.updateInvoicingTotals();
+        });
+      });
+
+      // Wire up remove buttons
+      container.querySelectorAll('[data-remove-addon-idx]').forEach(el => {
+        el.addEventListener('click', (e) => {
+          const idx = parseInt(e.target.closest('button').getAttribute('data-remove-addon-idx'));
+          this.addons.splice(idx, 1);
+          renderAddons();
+          this.updateInvoicingTotals();
+        });
+      });
+    };
+
+    btnAdd.addEventListener('click', () => {
+      this.addons.push({ name: '', amount: 0 });
+      renderAddons();
+      this.updateInvoicingTotals();
+    });
+
+    renderAddons();
+  }
+
+  async setupRecentSalesList() {
+    const tbody = document.getElementById('recent-sales-body');
+    if (!tbody) return;
+    const res = await API.getRecentTransactions();
+    if (!res.success) return;
+    const sales = res.data.filter(tx => tx.type === 'Sale' || tx.type === 'SALE');
+    if (sales.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-slate-500">No sales recorded yet.</td></tr>';
+      return;
+    }
+    const formatPKR = (num) => {
+      return new Intl.NumberFormat('en-PK', { style: 'currency', currency: 'PKR', minimumFractionDigits: 0 }).format(num).replace('PKR', 'Rs.');
+    };
+    tbody.innerHTML = sales.slice(0, 20).map(s => `
+      <tr class="hover:bg-slate-700/10">
+        <td class="py-3 px-4 font-mono text-brand-400 font-medium">${s.reference}</td>
+        <td class="py-3 px-4 font-semibold text-slate-200">${s.party}</td>
+        <td class="py-3 px-4 text-slate-400">${s.date}</td>
+        <td class="py-3 px-4 text-right font-bold">${formatPKR(s.amount)}</td>
+        <td class="py-3 px-4 text-right flex gap-1 justify-end">
+          <button data-print-sale-ref="${s.reference}" class="px-2 py-1 bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/10 rounded text-[10px] font-semibold transition-active">Print</button>
+          <button data-delete-sale-ref="${s.reference}" class="px-2 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/10 rounded text-[10px] font-semibold transition-active">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+
+    // Wire delete handlers
+    tbody.querySelectorAll('[data-delete-sale-ref]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        if (!confirm('Delete this invoice? This will restore stock and reverse ledger entries.')) return;
+        const ref = btn.getAttribute('data-delete-sale-ref');
+        const res = await API.deleteSale({ invoiceNumber: ref });
+        if (res.success) {
+          await this.mount(this.container);
+        } else {
+          alert(res.error || 'Failed to delete sale.');
+        }
+      });
+    });
+
+    // Wire print handlers
+    tbody.querySelectorAll('[data-print-sale-ref]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const ref = btn.getAttribute('data-print-sale-ref');
+        const res = await API.getSaleByInvoice(ref);
+        if (!res.success) { alert(res.error); return; }
+        const sale = res.data;
+        this.printInvoice(sale);
+      });
+    });
+  }
+
+  printInvoice(sale) {
+    const formatPKR = (num) => {
+      return new Intl.NumberFormat('en-PK', { style: 'currency', currency: 'PKR', minimumFractionDigits: 0 }).format(num).replace('PKR', 'Rs.');
+    };
+    const fmtDate = (d) => new Date(d).toLocaleDateString('en-PK', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+    const itemsRows = sale.saleItems.map(item => `
+      <tr>
+        <td style="padding:8px 6px;border-bottom:1px solid #e2e8f0;">${item.product.name}</td>
+        <td style="padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:center;">${item.quantity} ${item.unit}</td>
+        <td style="padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:right;">${formatPKR(item.sellingPrice)}</td>
+        <td style="padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:right;">${formatPKR(item.quantity * item.sellingPrice)}</td>
+      </tr>
+    `).join('');
+
+    const addonRows = (sale.saleAddons || []).map(a => `
+      <tr>
+        <td colspan="3" style="padding:8px 6px;border-bottom:1px solid #e2e8f0;color:#64748b;">${a.title}</td>
+        <td style="padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:right;color:#64748b;">${formatPKR(a.amount)}</td>
+      </tr>
+    `).join('');
+
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Invoice ${sale.invoiceNumber}</title>
+          <style>
+            body { font-family: 'Inter', Arial, sans-serif; color: #1e293b; padding: 40px; max-width: 800px; margin: 0 auto; }
+            .header { display: flex; justify-content: space-between; align-items: start; border-bottom: 2px solid #0f172a; padding-bottom: 20px; margin-bottom: 20px; }
+            .header h1 { margin: 0; font-size: 24px; color: #0f172a; }
+            .header .sub { font-size: 12px; color: #64748b; margin-top: 4px; }
+            .details { display: flex; justify-content: space-between; margin-bottom: 24px; font-size: 13px; }
+            .details div p { margin: 2px 0; }
+            table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 13px; }
+            th { background: #f8fafc; padding: 10px 6px; border-bottom: 2px solid #cbd5e1; font-weight: 700; color: #475569; text-align: left; }
+            th.right { text-align: right; }
+            td { padding: 8px 6px; border-bottom: 1px solid #e2e8f0; }
+            .totals { text-align: right; margin-top: 16px; font-size: 14px; }
+            .totals p { margin: 4px 0; }
+            .grand-total { font-size: 18px; font-weight: 800; color: #0f172a; border-top: 2px solid #0f172a; padding-top: 8px; margin-top: 8px; }
+            .footer { text-align: center; margin-top: 40px; font-size: 11px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 16px; }
+            .badge { display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+            .badge-paid { background: #dcfce7; color: #166534; }
+            .badge-unpaid { background: #fee2e2; color: #991b1b; }
+            @media print { body { padding: 20px; } }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div>
+              <h1>SA Traders</h1>
+              <div class="sub">Feed Factory — Pakistan Branch</div>
+              <div class="sub">Invoice #${sale.invoiceNumber}</div>
+            </div>
+            <div style="text-align:right;">
+              <div style="font-size:13px;font-weight:600;">${fmtDate(sale.saleDate)}</div>
+              <div style="margin-top:8px;">
+                <span class="badge ${sale.paidAmount >= sale.netAmount ? 'badge-paid' : 'badge-unpaid'}">
+                  ${sale.paidAmount >= sale.netAmount ? 'PAID' : sale.paidAmount > 0 ? 'PARTIAL' : 'UNPAID'}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div class="details">
+            <div>
+              <p><strong>Bill To:</strong></p>
+              <p>${sale.customer ? sale.customer.name : 'Cash Customer'}</p>
+              ${sale.customer?.phone ? `<p>${sale.customer.phone}</p>` : ''}
+              ${sale.customer?.address ? `<p>${sale.customer.address}</p>` : ''}
+            </div>
+            <div style="text-align:right;">
+              <p><strong>Payment Method:</strong> ${sale.paymentMethod === 'CASH' ? 'Instant Cash' : sale.paymentMethod === 'CREDIT' ? 'Khata Credit' : sale.paymentMethod === 'BANK' ? 'Bank Transfer' : 'Main Branch'}</p>
+              <p><strong>Invoice #:</strong> ${sale.invoiceNumber}</p>
+            </div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th style="text-align:center;">Qty</th>
+                <th class="right">Rate</th>
+                <th class="right">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${itemsRows}
+              ${addonRows}
+            </tbody>
+          </table>
+          <div class="totals">
+            <p>Subtotal: ${formatPKR(sale.totalAmount)}</p>
+            ${sale.discount > 0 ? `<p>Discount: -${formatPKR(sale.discount)}</p>` : ''}
+            <p class="grand-total">Net Total: ${formatPKR(sale.netAmount)}</p>
+            <p>Paid: ${formatPKR(sale.paidAmount)}</p>
+            <p>Balance Due: ${formatPKR(Math.max(0, sale.netAmount - sale.paidAmount))}</p>
+          </div>
+          <div class="footer">
+            <p>Thank you for your business!</p>
+            <p>Generated by SA Traders ERP</p>
+          </div>
+          <script>
+            window.onload = function() { window.print(); }
+          </script>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
   }
 }
