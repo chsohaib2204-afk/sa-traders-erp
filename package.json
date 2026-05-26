@@ -1,0 +1,78 @@
+{
+  "name": "cow-feed-erp",
+  "version": "1.0.0",
+  "description": "Cow Feed Factory ERP Desktop Application",
+  "author": "SA Traders",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:css": "npx tailwindcss -i ./src/renderer/css/input.css -o ./src/renderer/css/output.css",
+    "watch:css": "npx tailwindcss -i ./src/renderer/css/input.css -o ./src/renderer/css/output.css --watch",
+    "db:push": "npx prisma db push",
+    "db:studio": "npx prisma studio",
+    "postinstall": "npx prisma generate",
+    "dist": "npm run build:css && electron-builder",
+    "dist:mac": "npm run build:css && electron-builder --mac",
+    "dist:win": "npm run build:css && electron-builder --win",
+    "dist:linux": "npm run build:css && electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.satraders.erp",
+    "productName": "SA Traders ERP",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*",
+      "!**/.git/**",
+      "!**/node_modules/.cache/**",
+      "!**/node_modules/electron/**",
+      "!**/node_modules/electron-builder/**",
+      "!**/node_modules/prisma/build/**",
+      "!**/node_modules/prisma/preinstall/**",
+      "!**/node_modules/prisma/scripts/**",
+      "!**/node_modules/prisma/prisma-client/**"
+    ],
+    "asarUnpack": [
+      "src/database/generated/*.node"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "category": "public.app-category.business"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Office"
+    }
+  },
+  "dependencies": {
+    "@prisma/client": "^5.14.0",
+    "chart.js": "^4.4.2"
+  },
+  "devDependencies": {
+    "electron": "^30.0.1",
+    "electron-builder": "^24.13.3",
+    "prisma": "^5.14.0",
+    "tailwindcss": "^3.4.3",
+    "postcss": "^8.4.38",
+    "autoprefixer": "^10.4.19"
+  }
+}

@@ -1,0 +1,264 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/database/generated"
+}
+
+// 1. Product Model (Raw materials, manufactured feeds, oils, trading items)
+model Product {
+  id              String         @id @default(uuid())
+  name            String
+  sku             String?        @unique
+  category        String         // E.g., "Wanda", "Oil", "Raw Material", "Other"
+  type            String         // E.g., "RAW_MATERIAL", "MANUFACTURED", "TRADING"
+  unit            String         // E.g., "kg", "bag", "gram"
+  defaultPrice    Float          // Standard selling price
+  loyalPrice      Float          // Selling price for premium/loyal customers
+  lowStockAlert   Float          // Stock threshold to trigger alerts
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  batches         ProductBatch[]
+  recipe          Recipe?
+  recipeItems     RecipeItem[]
+  productionItems ProductionItem[]
+  saleItems       SaleItem[]
+  purchaseItems   PurchaseItem[]
+  stockMovements  StockMovement[]
+}
+
+// 2. ProductBatch Model (Supports batch tracking & FIFO costing)
+model ProductBatch {
+  id              String         @id @default(uuid())
+  productId       String
+  product         Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  batchNumber     String         @unique
+  quantity        Float          // Current stock in this batch (decreases upon sale/consumption)
+  initialQuantity Float          // Purchased/manufactured quantity
+  costPrice       Float          // Batch cost price (critical for FIFO calculations)
+  expiryDate      DateTime?
+  supplierId      String?
+  supplier        Supplier?      @relation(fields: [supplierId], references: [id])
+  purchaseId      String?
+  purchase        Purchase?      @relation(fields: [purchaseId], references: [id])
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  stockMovements  StockMovement[]
+  saleItems       SaleItem[]
+  productionItems ProductionItem[]
+}
+
+// 3. Customer Model (Khata running ledger tracking)
+model Customer {
+  id                   String         @id @default(uuid())
+  name                 String
+  phone                String?
+  address              String?
+  isLoyal              Boolean        @default(false)
+  isMainBranchCustomer Boolean        @default(false)
+  balance              Float          @default(0.0) // running balance (Positive = owes us, Negative = advance/credit)
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  sales                Sale[]
+  ledgerEntries        LedgerEntry[]
+}
+
+// 4. LedgerEntry Model (Individual debit/credit customer khata ledger entries)
+model LedgerEntry {
+  id             String        @id @default(uuid())
+  customerId     String
+  customer       Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  date           DateTime      @default(now())
+  description    String
+  type           String        // "DEBIT" (increases what they owe us), "CREDIT" (decreases balance/payment)
+  amount         Float
+  runningBalance Float         // Post-transaction running balance
+  saleId         String?
+  sale           Sale?         @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+}
+
+// 5. Supplier Model
+model Supplier {
+  id             String         @id @default(uuid())
+  name           String
+  phone          String?
+  address        String?
+  balance        Float          @default(0.0) // running balance (Positive = we owe them, Negative = advance payment)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  batches        ProductBatch[]
+  purchases      Purchase[]
+}
+
+// 6. Purchase Model (Recording stock intake from suppliers)
+model Purchase {
+  id            String         @id @default(uuid())
+  supplierId    String?
+  supplier      Supplier?      @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  purchaseDate  DateTime       @default(now())
+  invoiceNumber String?
+  totalAmount   Float
+  paidAmount    Float
+  paymentStatus String         // "PAID", "PARTIAL", "UNPAID"
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  purchaseItems PurchaseItem[]
+  batches       ProductBatch[]
+}
+
+// 7. PurchaseItem Model
+model PurchaseItem {
+  id          String        @id @default(uuid())
+  purchaseId  String
+  purchase    Purchase      @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product       @relation(fields: [productId], references: [id])
+  quantity    Float
+  costPrice   Float
+  unit        String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+// 8. Sale Model (Invoice/transaction record)
+model Sale {
+  id                  String         @id @default(uuid())
+  customerId          String?
+  customer            Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  saleDate            DateTime       @default(now())
+  invoiceNumber       String         @unique
+  totalAmount         Float          // Sum of items before discount
+  discount            Float          @default(0.0)
+  netAmount           Float          // Total to pay (totalAmount - discount)
+  paidAmount          Float          // Cash received instantly
+  paymentMethod       String         // "CASH", "CREDIT", "BANK", "MAIN_BRANCH"
+  isMainBranchSettled Boolean        @default(false)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  saleItems           SaleItem[]
+  ledgerEntries       LedgerEntry[]
+}
+
+// 9. SaleItem Model (Individual invoice lines)
+model SaleItem {
+  id           String        @id @default(uuid())
+  saleId       String
+  sale         Sale          @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId    String
+  product      Product       @relation(fields: [productId], references: [id])
+  batchId      String?
+  batch        ProductBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  quantity     Float
+  sellingPrice Float
+  costPrice    Float         // Captured at sale time based on FIFO for accurate COGS reporting
+  unit         String
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+// 10. Recipe Model (Formula details for manufacturing Wanda)
+model Recipe {
+  id             String       @id @default(uuid())
+  productId      String       @unique // Product generated
+  product        Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name           String
+  outputQuantity Float        @default(1.0) // Expected base yield (e.g. 1 bag or 40kg)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  recipeItems    RecipeItem[]
+}
+
+// 11. RecipeItem Model (Ingredients required for the recipe)
+model RecipeItem {
+  id        String   @id @default(uuid())
+  recipeId  String
+  recipe    Recipe   @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  productId String   // Raw ingredient product
+  product   Product  @relation(fields: [productId], references: [id])
+  quantity  Float    // Raw qty needed for outputQuantity
+  unit      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// 12. Production Model (Actual manufacturing log)
+model Production {
+  id               String           @id @default(uuid())
+  productId        String           // Product made
+  recipeId         String?
+  batchNumber      String           // New batch code generated for the produced stock
+  quantityProduced Float            // Total qty produced
+  costPerUnit      Float            // Total cost / quantityProduced
+  totalCost        Float            // Combined cost of all ingredients consumed
+  productionDate   DateTime         @default(now())
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  productionItems  ProductionItem[]
+}
+
+// 13. ProductionItem Model (Detailed raw ingredients consumed)
+model ProductionItem {
+  id               String       @id @default(uuid())
+  productionId     String
+  production       Production   @relation(fields: [productionId], references: [id], onDelete: Cascade)
+  productId        String       // Ingredient product
+  product          Product      @relation(fields: [productId], references: [id])
+  batchId          String       // Source batch that ingredients were drawn from (FIFO)
+  batch            ProductBatch @relation(fields: [batchId], references: [id])
+  quantityConsumed Float
+  costPrice        Float        // cost price at consumption time
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+}
+
+// 14. Expense Model
+model Expense {
+  id          String   @id @default(uuid())
+  category    String   // "SALARY", "ELECTRICITY", "TRANSPORT", "MAINTENANCE", "OTHER"
+  amount      Float
+  date        DateTime @default(now())
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// 15. MainBranchTransaction Model (Accounting ledger for head office payables)
+model MainBranchTransaction {
+  id                  String   @id @default(uuid())
+  date                DateTime @default(now())
+  type                String   // "PAYABLE_INCREASE" (supplier paid by branch), "PAYABLE_DECREASE" (settled)
+  amount              Float
+  description         String
+  referenceSaleId     String?  // Linked sale if customer belongs to branch
+  referencePurchaseId String?  // Linked purchase if supplier paid by branch
+  runningPayable      Float    // Cumulative amount owed to main branch
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+// 16. StockMovement Model (Continuous audit logs of stock additions/deductions)
+model StockMovement {
+  id          String        @id @default(uuid())
+  productId   String
+  product     Product       @relation(fields: [productId], references: [id])
+  batchId     String?
+  batch       ProductBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  type        String        // "PURCHASE", "SALE", "PRODUCTION_CONSUMPTION", "PRODUCTION_OUTPUT", "ADJUSTMENT"
+  quantity    Float         // Positive for adds, negative for deductions
+  unit        String
+  description String?
+  createdAt   DateTime      @default(now())
+}
