@@ -2,6 +2,9 @@ const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
+// Force 100% scale — ignore OS-level DPI scaling (e.g. Windows 150% or macOS "Larger Text")
+app.commandLine.appendSwitch('force-device-scale-factor', '1');
+
 // Determine if we are in development mode
 const isDev = !app.isPackaged;
 
@@ -64,6 +67,10 @@ app.whenReady().then(async () => {
   // Load IPC database controllers (after schema exists)
   require('./ipcHandlers');
 
+  // Start background sync engine (offline → Supabase)
+  const { startSyncService } = require('./syncService');
+  startSyncService();
+
   createWindow();
 
   app.on('activate', () => {
@@ -75,4 +82,52 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+// ─── Auto-backup on quit ─────────────────────────────────
+// Performs a full cloud backup before the app exits, then
+// enforces the 30-backup retention policy.
+
+let isQuitting = false;
+const BACKUP_TIMEOUT_MS = 30_000;
+
+app.on('before-quit', async (event) => {
+  if (isQuitting) return;
+  event.preventDefault();
+  isQuitting = true;
+
+  console.log('[Backup] Auto backup on exit…');
+
+  let timeoutId;
+  const backupPromise = (async () => {
+    const { createFullBackup, cleanupOldBackups } = require('./backupService');
+    const result = await createFullBackup();
+    if (result.success) {
+      console.log('[Backup] Auto backup completed before exit');
+      await cleanupOldBackups();
+    } else {
+      console.log('[Backup] Auto backup failed, continuing shutdown');
+    }
+  })();
+
+  const race = Promise.race([
+    backupPromise,
+    new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error('timeout')), BACKUP_TIMEOUT_MS);
+    }),
+  ]);
+
+  try {
+    await race;
+  } catch (err) {
+    if (err.message === 'timeout') {
+      console.log('[Backup] Backup timeout, continuing shutdown');
+    } else {
+      console.log('[Backup] Auto backup error, continuing shutdown');
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  app.quit();
 });

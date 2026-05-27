@@ -1,6 +1,7 @@
 const { ipcMain } = require('electron');
 const { PrismaClient } = require('../database/generated');
 const { convertToKg, convertFromKg, BAG_TO_KG } = require('./unitConverter.js');
+const { enqueueSync } = require('./syncQueue.js');
 
 const prisma = new PrismaClient();
 
@@ -24,7 +25,8 @@ function stockInProductUnit(product, batches) {
   return totalKg;
 }
 
-// Global actions mapper
+// Global actions mapper (guarded for test environments without Electron)
+if (ipcMain && typeof ipcMain.handle === 'function') {
 ipcMain.handle('db-action', async (event, payload) => {
   const action = payload?.action;
   const data = payload?.data ?? {};
@@ -97,6 +99,11 @@ ipcMain.handle('db-action', async (event, payload) => {
       // System Reset
       case 'reset-database': return await resetDatabase();
 
+      // --- Backup & Restore (Supabase cloud snapshots) ---
+      case 'create-backup': return await createBackup();
+      case 'restore-backup': return await restoreBackup(data);
+      case 'list-backups': return await listBackups();
+
       default:
         throw new Error(`Unhandled action: ${action}`);
     }
@@ -105,7 +112,8 @@ ipcMain.handle('db-action', async (event, payload) => {
     return { success: false, error: error.message };
   }
 });
-
+}
+ 
 // --- Phase 1 & 2: Main Controllers ---
 // (Already implemented above - kept standard for operations)
 
@@ -187,12 +195,12 @@ async function getDashboardSummary() {
     const d = new Date();
     d.setDate(d.getDate() - i);
     d.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(d);
-    endOfDay.setHours(23, 59, 59, 999);
+    const nextDay = new Date(d);
+    nextDay.setDate(nextDay.getDate() + 1);
 
     const daySales = await prisma.sale.aggregate({
       _sum: { netAmount: true },
-      where: { saleDate: { gte: d, lte: endOfDay } }
+      where: { saleDate: { gte: d, lt: nextDay } }
     });
 
     chartSales.push({
@@ -345,17 +353,21 @@ async function createProduct(payload) {
     if (existing) return { success: false, error: `Product with SKU '${sku}' already exists.` };
   }
 
-  const newProduct = await prisma.product.create({
-    data: {
-      name: name.trim(),
-      sku: sku ? sku.trim() : null,
-      category: category || "Other",
-      type: type || "RAW_MATERIAL",
-      unit: unit || "kg",
-      defaultPrice: parseFloat(defaultPrice) || 0.0,
-      loyalPrice: parseFloat(loyalPrice) || 0.0,
-      lowStockAlert: parseFloat(lowStockAlert) || 0.0
-    }
+  const newProduct = await prisma.$transaction(async (tx) => {
+    const record = await tx.product.create({
+      data: {
+        name: name.trim(),
+        sku: sku ? sku.trim() : null,
+        category: category || "Other",
+        type: type || "RAW_MATERIAL",
+        unit: unit || "kg",
+        defaultPrice: parseFloat(defaultPrice) || 0.0,
+        loyalPrice: parseFloat(loyalPrice) || 0.0,
+        lowStockAlert: parseFloat(lowStockAlert) || 0.0
+      }
+    });
+    await enqueueSync(tx, 'product', record.id, 'CREATE', record);
+    return record;
   });
   return { success: true, data: newProduct };
 }
@@ -387,13 +399,17 @@ async function createSupplier(payload) {
   const { name, phone, address, initialBalance } = payload;
   if (!name) return { success: false, error: "Supplier Name is required" };
 
-  const supplier = await prisma.supplier.create({
-    data: {
-      name: name.trim(),
-      phone: phone ? phone.trim() : null,
-      address: address ? address.trim() : null,
-      balance: parseFloat(initialBalance) || 0.0
-    }
+  const supplier = await prisma.$transaction(async (tx) => {
+    const record = await tx.supplier.create({
+      data: {
+        name: name.trim(),
+        phone: phone ? phone.trim() : null,
+        address: address ? address.trim() : null,
+        balance: parseFloat(initialBalance) || 0.0
+      }
+    });
+    await enqueueSync(tx, 'supplier', record.id, 'CREATE', record);
+    return record;
   });
   return { success: true, data: supplier };
 }
@@ -508,6 +524,7 @@ async function createPurchase(payload) {
         });
       }
 
+      await enqueueSync(tx, 'purchase', purchase.id, 'CREATE', purchase);
       return purchase;
     });
 
@@ -548,6 +565,7 @@ async function adjustStock(payload) {
           description: description || "Manual stock adjustment"
         }
       });
+      await enqueueSync(tx, 'productBatch', updatedBatch.id, 'UPDATE', updatedBatch);
       return updatedBatch;
     });
     return { success: true, data: result };
@@ -608,6 +626,7 @@ async function createCustomer(payload) {
         });
       }
 
+      await enqueueSync(tx, 'customer', customer.id, 'CREATE', customer);
       return customer;
     });
     return { success: true, data: result };
@@ -648,12 +667,13 @@ async function receiveCustomerPayment(payload) {
 
       const newBalance = customer.balance - payVal;
 
-      await tx.customer.update({
+      const updatedCustomer = await tx.customer.update({
         where: { id: customerId },
         data: { balance: newBalance }
       });
+      await enqueueSync(tx, 'customer', customerId, 'UPDATE', updatedCustomer);
 
-      await tx.ledgerEntry.create({
+      const entry = await tx.ledgerEntry.create({
         data: {
           customerId,
           date: date ? new Date(date) : new Date(),
@@ -663,11 +683,12 @@ async function receiveCustomerPayment(payload) {
           runningBalance: newBalance
         }
       });
+      await enqueueSync(tx, 'ledgerEntry', entry.id, 'CREATE', entry);
 
       // Deposit to Cash Box
       const lastCb = await tx.cashBox.findFirst({ orderBy: { createdAt: 'desc' } });
       const prevCbBal = lastCb ? lastCb.runningBalance : 0.0;
-      await tx.cashBox.create({
+      const cbEntry = await tx.cashBox.create({
         data: {
           type: 'DEPOSIT',
           amount: payVal,
@@ -677,6 +698,7 @@ async function receiveCustomerPayment(payload) {
           runningBalance: prevCbBal + payVal
         }
       });
+      await enqueueSync(tx, 'cashBox', cbEntry.id, 'CREATE', cbEntry);
     });
     return { success: true };
   } catch (err) {
@@ -703,6 +725,7 @@ async function cashBoxDeposit(data) {
           runningBalance: prevBal + parseFloat(amount)
         }
       });
+      await enqueueSync(tx, 'cashBox', entry.id, 'CREATE', entry);
       return { success: true, data: entry };
     });
   } catch (err) {
@@ -718,7 +741,7 @@ async function cashBoxWithdraw(data) {
       const last = await tx.cashBox.findFirst({ orderBy: { createdAt: 'desc' } });
       const prevBal = last ? last.runningBalance : 0.0;
       if (prevBal < parseFloat(amount)) {
-        return { success: false, error: `Insufficient Cash Box balance. Available: ${prevBal}` };
+        throw new Error(`Insufficient Cash Box balance. Available: ${prevBal}`);
       }
       const entry = await tx.cashBox.create({
         data: {
@@ -730,6 +753,7 @@ async function cashBoxWithdraw(data) {
           runningBalance: prevBal - parseFloat(amount)
         }
       });
+      await enqueueSync(tx, 'cashBox', entry.id, 'CREATE', entry);
       return { success: true, data: entry };
     });
   } catch (err) {
@@ -952,7 +976,7 @@ async function createSale(payload) {
         const currentPayable = lastTx ? lastTx.runningPayable : 0.0;
         const newPayable = currentPayable - net;
 
-        await tx.mainBranchTransaction.create({
+        const branchTx = await tx.mainBranchTransaction.create({
           data: {
             type: "PAYABLE_DECREASE",
             amount: net,
@@ -962,8 +986,10 @@ async function createSale(payload) {
             date: new Date()
           }
         });
+        await enqueueSync(tx, 'mainBranchTransaction', branchTx.id, 'CREATE', branchTx);
       }
 
+      await enqueueSync(tx, 'sale', sale.id, 'CREATE', sale);
       return sale;
     });
 
@@ -1014,19 +1040,23 @@ async function createRecipe(payload) {
   }
 
   try {
-    const recipe = await prisma.recipe.create({
-      data: {
-        productId,
-        name: name || "Formula Mix Recipe",
-        outputQuantity: totalWeightKg,
-        recipeItems: {
-          create: validItems.map(item => ({
-            productId: item.productId,
-            quantity: parseFloat(item.quantity) || 0.0,
-            unit: "kg"
-          }))
+    const recipe = await prisma.$transaction(async (tx) => {
+      const record = await tx.recipe.create({
+        data: {
+          productId,
+          name: name || "Formula Mix Recipe",
+          outputQuantity: totalWeightKg,
+          recipeItems: {
+            create: validItems.map(item => ({
+              productId: item.productId,
+              quantity: parseFloat(item.quantity) || 0.0,
+              unit: "kg"
+            }))
+          }
         }
-      }
+      });
+      await enqueueSync(tx, 'recipe', record.id, 'CREATE', record);
+      return record;
     });
     return { success: true, data: recipe };
   } catch (err) {
@@ -1053,6 +1083,9 @@ async function executeProduction(payload) {
       let totalIngredientsCost = 0.0;
 
       const scaleFactor = qtyProduced / recipe.outputQuantity;
+
+      // Track actual batch-level consumption for production item audit trail
+      const consumptionDetail = {};
 
       // 1. Loop and deduct recipe ingredients FIFO style
       for (const ing of recipe.recipeItems) {
@@ -1099,6 +1132,10 @@ async function executeProduction(payload) {
 
           // Accumulate actual ingredient purchase cost
           totalIngredientsCost += taken * batch.costPrice;
+
+          // Record per-batch consumption detail
+          if (!consumptionDetail[ing.productId]) consumptionDetail[ing.productId] = [];
+          consumptionDetail[ing.productId].push({ batchId: batch.id, taken, costPrice: batch.costPrice });
         }
       }
 
@@ -1154,19 +1191,22 @@ async function executeProduction(payload) {
         }
       });
 
-      // Log consumed items details
-      for (const ing of recipe.recipeItems) {
-        await tx.productionItem.create({
-          data: {
-            productionId: production.id,
-            productId: ing.productId,
-            batchId: newBatch.id,
-            quantityConsumed: ing.quantity * scaleFactor,
-            costPrice: costPerKg
-          }
-        });
+      // Log consumed items details at actual batch granularity with actual costs
+      for (const [prodId, details] of Object.entries(consumptionDetail)) {
+        for (const d of details) {
+          await tx.productionItem.create({
+            data: {
+              productionId: production.id,
+              productId: prodId,
+              batchId: d.batchId,
+              quantityConsumed: d.taken,
+              costPrice: d.costPrice
+            }
+          });
+        }
       }
 
+      await enqueueSync(tx, 'production', production.id, 'CREATE', production);
       return production;
     });
 
@@ -1237,6 +1277,7 @@ async function createBranchTransaction(payload) {
           date: new Date()
         }
       });
+      await enqueueSync(tx, 'mainBranchTransaction', branchTx.id, 'CREATE', branchTx);
       return branchTx;
     });
     return { success: true, data: result };
@@ -1259,13 +1300,17 @@ async function createExpense(payload) {
   const val = parseFloat(amount) || 0.0;
   if (val <= 0) return { success: false, error: "Expense amount must be positive" };
 
-  const exp = await prisma.expense.create({
-    data: {
-      category,
-      amount: val,
-      description: description || "Daily factory expense",
-      date: date ? new Date(date) : new Date()
-    }
+  const exp = await prisma.$transaction(async (tx) => {
+    const record = await tx.expense.create({
+      data: {
+        category,
+        amount: val,
+        description: description || "Daily factory expense",
+        date: date ? new Date(date) : new Date()
+      }
+    });
+    await enqueueSync(tx, 'expense', record.id, 'CREATE', record);
+    return record;
   });
   return { success: true, data: exp };
 }
@@ -1331,15 +1376,19 @@ async function updateCustomer(data) {
   const { id, name, phone, address, isLoyal, isMainBranchCustomer } = data;
   if (!id || !name) return { success: false, error: "Customer ID and Name are required" };
   try {
-    const updated = await prisma.customer.update({
-      where: { id },
-      data: {
-        name: name.trim(),
-        phone: phone || null,
-        address: address || null,
-        isLoyal: !!isLoyal,
-        isMainBranchCustomer: !!isMainBranchCustomer
-      }
+    const updated = await prisma.$transaction(async (tx) => {
+      const record = await tx.customer.update({
+        where: { id },
+        data: {
+          name: name.trim(),
+          phone: phone || null,
+          address: address || null,
+          isLoyal: !!isLoyal,
+          isMainBranchCustomer: !!isMainBranchCustomer
+        }
+      });
+      await enqueueSync(tx, 'customer', record.id, 'UPDATE', record);
+      return record;
     });
     return { success: true, data: updated };
   } catch (err) {
@@ -1351,12 +1400,15 @@ async function deleteCustomer(data) {
   const { id } = data;
   if (!id) return { success: false, error: "Customer ID is required" };
   try {
-    const customer = await prisma.customer.findUnique({ where: { id } });
-    if (!customer) return { success: false, error: "Customer not found." };
+    await prisma.$transaction(async (tx) => {
+      const customer = await tx.customer.findUnique({ where: { id } });
+      if (!customer) throw new Error("Customer not found.");
 
-    // LedgerEntry has onDelete: Cascade, so entries auto-delete with customer
-    // Sale has onDelete: SetNull on customerId, so sales are unlinked automatically
-    await prisma.customer.delete({ where: { id } });
+      // LedgerEntry has onDelete: Cascade, so entries auto-delete with customer
+      // Sale has onDelete: SetNull on customerId, so sales are unlinked automatically
+      await tx.customer.delete({ where: { id } });
+      await enqueueSync(tx, 'customer', id, 'DELETE', customer);
+    });
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1371,18 +1423,22 @@ async function updateProduct(data) {
       const existing = await prisma.product.findFirst({ where: { sku: sku.trim(), NOT: { id } } });
       if (existing) return { success: false, error: `SKU '${sku}' already in use` };
     }
-    const updated = await prisma.product.update({
-      where: { id },
-      data: {
-        name: name.trim(),
-        sku: sku || null,
-        category: category || "Other",
-        type: type || "RAW_MATERIAL",
-        unit: unit || "kg",
-        defaultPrice: parseFloat(defaultPrice) || 0.0,
-        loyalPrice: parseFloat(loyalPrice) || 0.0,
-        lowStockAlert: parseFloat(lowStockAlert) || 0.0
-      }
+    const updated = await prisma.$transaction(async (tx) => {
+      const record = await tx.product.update({
+        where: { id },
+        data: {
+          name: name.trim(),
+          sku: sku || null,
+          category: category || "Other",
+          type: type || "RAW_MATERIAL",
+          unit: unit || "kg",
+          defaultPrice: parseFloat(defaultPrice) || 0.0,
+          loyalPrice: parseFloat(loyalPrice) || 0.0,
+          lowStockAlert: parseFloat(lowStockAlert) || 0.0
+        }
+      });
+      await enqueueSync(tx, 'product', record.id, 'UPDATE', record);
+      return record;
     });
     return { success: true, data: updated };
   } catch (err) {
@@ -1409,7 +1465,10 @@ async function deleteProduct(data) {
     const recipeCount = await prisma.recipeItem.count({ where: { productId: id } });
     if (recipeCount > 0) return { success: false, error: "Cannot delete product used in manufacturing recipes." };
 
-    await prisma.product.delete({ where: { id } });
+    await prisma.$transaction(async (tx) => {
+      await tx.product.delete({ where: { id } });
+      await enqueueSync(tx, 'product', id, 'DELETE', product);
+    });
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1463,27 +1522,44 @@ async function deleteSale(data) {
       // Reverse Cash Box entries for this sale
       const cbEntries = await tx.cashBox.findMany({ where: { referenceType: 'SALE', referenceId: sale.id }, orderBy: { createdAt: 'asc' } });
       if (cbEntries.length > 0) {
-        for (const cb of cbEntries) {
-          // Remove the deposit and recalculate balances
-          const lastBefore = await tx.cashBox.findFirst({
-            where: { createdAt: { lt: cb.createdAt } },
-            orderBy: { createdAt: 'desc' }
-          });
-          const balBefore = lastBefore ? lastBefore.runningBalance : 0.0;
-          // Create reversal entry
-          await tx.cashBox.create({
-            data: {
-              type: 'WITHDRAWAL',
-              amount: cb.amount,
-              description: `Reversal of sale ${sale.invoiceNumber}`,
-              referenceType: 'SALE_REVERSAL',
-              referenceId: sale.id,
-              runningBalance: balBefore
-            }
+        const firstEntry = cbEntries[0];
+        const totalAmount = cbEntries.reduce((s, e) => s + e.amount, 0);
+
+        // Balance just before the first sale-related entry
+        const lastBefore = await tx.cashBox.findFirst({
+          where: { createdAt: { lt: firstEntry.createdAt } },
+          orderBy: { createdAt: 'desc' }
+        });
+        const balBefore = lastBefore ? lastBefore.runningBalance : 0.0;
+
+        // Delete original Cash Box entries for this sale
+        await tx.cashBox.deleteMany({ where: { referenceType: 'SALE', referenceId: sale.id } });
+
+        // Create a single reversal withdrawal (temp balance, will recalculate below)
+        await tx.cashBox.create({
+          data: {
+            type: 'WITHDRAWAL',
+            amount: totalAmount,
+            description: `Reversal of sale ${sale.invoiceNumber}`,
+            referenceType: 'SALE_REVERSAL',
+            referenceId: sale.id,
+            runningBalance: 0
+          }
+        });
+
+        // Recalculate running balances for ALL entries from first sale entry onward
+        const remaining = await tx.cashBox.findMany({
+          where: { createdAt: { gt: firstEntry.createdAt } },
+          orderBy: { createdAt: 'asc' }
+        });
+        let runningBal = balBefore;
+        for (const entry of remaining) {
+          runningBal += entry.type === 'DEPOSIT' ? entry.amount : -entry.amount;
+          await tx.cashBox.update({
+            where: { id: entry.id },
+            data: { runningBalance: runningBal }
           });
         }
-        // Delete original Cash Box entries
-        await tx.cashBox.deleteMany({ where: { referenceType: 'SALE', referenceId: sale.id } });
       }
 
       // Reverse main branch transactions
@@ -1495,18 +1571,41 @@ async function deleteSale(data) {
             type: "PAYABLE_INCREASE",
             amount: sale.netAmount,
             description: `Reversal of sale ${sale.invoiceNumber}`,
-            runningPayable: currentPayable + sale.netAmount
+            runningPayable: currentPayable + sale.netAmount,
+            referenceSaleId: sale.id
           }
         });
       }
 
-      // Delete sale items and stock movements
-      await tx.stockMovement.deleteMany({
-        where: { type: "SALE", description: { contains: sale.invoiceNumber } }
-      });
+      // Create reversal stock movements and delete originals
+      for (const item of sale.saleItems) {
+        if (item.batchId) {
+          const isBag = item.unit === 'bag';
+          const qtyInKg = isBag ? item.quantity * BAG_TO_KG : item.quantity;
+          await tx.stockMovement.create({
+            data: {
+              productId: item.productId,
+              batchId: item.batchId,
+              type: "SALE_REVERSAL",
+              quantity: qtyInKg,
+              unit: "kg",
+              description: `Stock restored from deleted sale ${sale.invoiceNumber}`
+            }
+          });
+        }
+      }
+      // Delete original SALE stock movements
+      const saleItemBatchIds = sale.saleItems.filter(i => i.batchId).map(i => i.batchId);
+      if (saleItemBatchIds.length > 0) {
+        await tx.stockMovement.deleteMany({
+          where: { type: "SALE", batchId: { in: saleItemBatchIds }, description: { contains: sale.invoiceNumber } }
+        });
+      }
+
       await tx.saleItem.deleteMany({ where: { saleId: sale.id } });
       await tx.saleAddon.deleteMany({ where: { saleId: sale.id } });
       await tx.sale.delete({ where: { id: sale.id } });
+      await enqueueSync(tx, 'sale', sale.id, 'DELETE', sale);
     });
     return { success: true };
   } catch (err) {
@@ -1540,7 +1639,7 @@ async function deleteLedgerEntry(data) {
       if (entry.customerId) {
         const remaining = await tx.ledgerEntry.findMany({
           where: { customerId: entry.customerId },
-          orderBy: { date: 'asc', createdAt: 'asc' }
+          orderBy: [{ date: 'asc' }, { createdAt: 'asc' }]
         });
         let runningBal = 0;
         for (const rem of remaining) {
@@ -1548,6 +1647,7 @@ async function deleteLedgerEntry(data) {
           await tx.ledgerEntry.update({ where: { id: rem.id }, data: { runningBalance: runningBal } });
         }
       }
+      await enqueueSync(tx, 'ledgerEntry', id, 'DELETE', entry);
     });
     return { success: true };
   } catch (err) {
@@ -1568,6 +1668,9 @@ async function deleteBatch(data) {
     }
 
     await prisma.$transaction(async (tx) => {
+      // Delete original consumption stock movements first
+      await tx.stockMovement.deleteMany({ where: { batchId: id, type: 'PRODUCTION_CONSUMPTION' } });
+
       // Reverse any production consumption that used this batch as ingredient
       const prodItems = await tx.productionItem.findMany({ where: { batchId: id } });
       for (const pi of prodItems) {
@@ -1591,7 +1694,9 @@ async function deleteBatch(data) {
         await tx.productionItem.delete({ where: { id: pi.id } });
       }
 
-      await tx.stockMovement.deleteMany({ where: { batchId: id } });
+      // Clean up any remaining stock movements (excluding reversals just created)
+      await tx.stockMovement.deleteMany({ where: { batchId: id, type: { not: 'PRODUCTION_CONSUMPTION_REVERSAL' } } });
+      await enqueueSync(tx, 'productBatch', id, 'DELETE', batch);
       await tx.productBatch.delete({ where: { id } });
     });
     return { success: true };
@@ -1606,29 +1711,31 @@ async function updateRecipe(data) {
   try {
     const updateData = {};
     if (name) updateData.name = name;
-    if (items && items.length > 0) {
-      const validItems = items.filter(i => i.productId && parseFloat(i.quantity) > 0);
-      const totalWeightKg = validItems.reduce((sum, i) => sum + (parseFloat(i.quantity) || 0), 0);
-      updateData.outputQuantity = totalWeightKg > 0 ? totalWeightKg : 1;
+    await prisma.$transaction(async (tx) => {
+      if (items && items.length > 0) {
+        const validItems = items.filter(i => i.productId && parseFloat(i.quantity) > 0);
+        const totalWeightKg = validItems.reduce((sum, i) => sum + (parseFloat(i.quantity) || 0), 0);
+        updateData.outputQuantity = totalWeightKg > 0 ? totalWeightKg : 1;
 
-      // Delete existing items and recreate
-      await prisma.recipeItem.deleteMany({ where: { recipeId: id } });
-      await prisma.recipe.update({
-        where: { id },
-        data: {
-          ...updateData,
-          recipeItems: {
-            create: validItems.map(item => ({
-              productId: item.productId,
-              quantity: parseFloat(item.quantity) || 0,
-              unit: "kg"
-            }))
+        await tx.recipeItem.deleteMany({ where: { recipeId: id } });
+        await tx.recipe.update({
+          where: { id },
+          data: {
+            ...updateData,
+            recipeItems: {
+              create: validItems.map(item => ({
+                productId: item.productId,
+                quantity: parseFloat(item.quantity) || 0,
+                unit: "kg"
+              }))
+            }
           }
-        }
-      });
-    } else {
-      await prisma.recipe.update({ where: { id }, data: updateData });
-    }
+        });
+      } else {
+        await tx.recipe.update({ where: { id }, data: updateData });
+      }
+      await enqueueSync(tx, 'recipe', id, 'UPDATE', { id, ...updateData });
+    });
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1642,11 +1749,14 @@ async function deleteRecipe(data) {
     const recipe = await prisma.recipe.findUnique({ where: { id } });
     if (!recipe) return { success: false, error: "Recipe not found." };
     const prodCount = await prisma.production.count({ where: { recipeId: id } });
-    if (prodCount > 0) {
-      await prisma.production.updateMany({ where: { recipeId: id }, data: { recipeId: null } });
-    }
-    await prisma.recipeItem.deleteMany({ where: { recipeId: id } });
-    await prisma.recipe.delete({ where: { id } });
+    await prisma.$transaction(async (tx) => {
+      if (prodCount > 0) {
+        await tx.production.updateMany({ where: { recipeId: id }, data: { recipeId: null } });
+      }
+      await tx.recipeItem.deleteMany({ where: { recipeId: id } });
+      await tx.recipe.delete({ where: { id } });
+      await enqueueSync(tx, 'recipe', id, 'DELETE', recipe);
+    });
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1657,14 +1767,18 @@ async function updateExpense(data) {
   const { id, category, amount, description, date } = data;
   if (!id) return { success: false, error: "Expense ID is required" };
   try {
-    const updated = await prisma.expense.update({
-      where: { id },
-      data: {
-        category: category || undefined,
-        amount: amount ? parseFloat(amount) : undefined,
-        description: description !== undefined ? description : undefined,
-        date: date ? new Date(date) : undefined
-      }
+    const updated = await prisma.$transaction(async (tx) => {
+      const record = await tx.expense.update({
+        where: { id },
+        data: {
+          category: category || undefined,
+          amount: amount ? parseFloat(amount) : undefined,
+          description: description !== undefined ? description : undefined,
+          date: date ? new Date(date) : undefined
+        }
+      });
+      await enqueueSync(tx, 'expense', record.id, 'UPDATE', record);
+      return record;
     });
     return { success: true, data: updated };
   } catch (err) {
@@ -1678,7 +1792,10 @@ async function deleteExpense(data) {
   try {
     const existing = await prisma.expense.findUnique({ where: { id } });
     if (!existing) return { success: false, error: "Expense not found." };
-    await prisma.expense.delete({ where: { id } });
+    await prisma.$transaction(async (tx) => {
+      await tx.expense.delete({ where: { id } });
+      await enqueueSync(tx, 'expense', id, 'DELETE', existing);
+    });
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1691,17 +1808,21 @@ async function createSaleAddons(data) {
   const { saleId, addons } = data;
   if (!saleId || !addons || !Array.isArray(addons)) return { success: false, error: "Sale ID and addons array required" };
   try {
-    const created = [];
-    for (const addon of addons) {
-      const a = await prisma.saleAddon.create({
-        data: {
-          saleId,
-          title: addon.title || "Extra Charge",
-          amount: parseFloat(addon.amount) || 0
-        }
-      });
-      created.push(a);
-    }
+    const created = await prisma.$transaction(async (tx) => {
+      const records = [];
+      for (const addon of addons) {
+        const a = await tx.saleAddon.create({
+          data: {
+            saleId,
+            title: addon.title || "Extra Charge",
+            amount: parseFloat(addon.amount) || 0
+          }
+        });
+        records.push(a);
+        await enqueueSync(tx, 'saleAddon', a.id, 'CREATE', a);
+      }
+      return records;
+    });
     return { success: true, data: created };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1723,12 +1844,16 @@ async function createPartnerWithdrawal(data) {
   const { partnerName, amount, note } = data;
   if (!partnerName || !amount) return { success: false, error: "Partner name and amount required" };
   try {
-    const w = await prisma.partnerWithdrawal.create({
-      data: {
-        partnerName,
-        amount: parseFloat(amount),
-        note: note || null
-      }
+    const w = await prisma.$transaction(async (tx) => {
+      const record = await tx.partnerWithdrawal.create({
+        data: {
+          partnerName,
+          amount: parseFloat(amount),
+          note: note || null
+        }
+      });
+      await enqueueSync(tx, 'partnerWithdrawal', record.id, 'CREATE', record);
+      return record;
     });
     return { success: true, data: w };
   } catch (err) {
@@ -1742,7 +1867,10 @@ async function deletePartnerWithdrawal(data) {
   try {
     const existing = await prisma.partnerWithdrawal.findUnique({ where: { id } });
     if (!existing) return { success: false, error: "Withdrawal not found." };
-    await prisma.partnerWithdrawal.delete({ where: { id } });
+    await prisma.$transaction(async (tx) => {
+      await tx.partnerWithdrawal.delete({ where: { id } });
+      await enqueueSync(tx, 'partnerWithdrawal', id, 'DELETE', existing);
+    });
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1783,21 +1911,20 @@ async function getDailyProfit() {
     const salesTotal = todaySales._sum.netAmount || 0;
     const grossProfit = todayRevenue - todayCOGS;
 
-    console.log(`[DailyProfit] rev=${todayRevenue} cogs=${todayCOGS} gross=${grossProfit} sales=${salesTotal} items=${todaySaleItems.length}`);
     const expensesTotal = todayExpenses._sum.amount || 0;
     const netProfit = grossProfit - expensesTotal;
 
     const sohaibTotal = await prisma.partnerWithdrawal.aggregate({
       _sum: { amount: true },
-      where: { partnerName: { contains: 'sohaib', mode: 'insensitive' } }
+      where: { partnerName: { contains: 'sohaib' } }
     });
     const tayyabTotal = await prisma.partnerWithdrawal.aggregate({
       _sum: { amount: true },
-      where: { partnerName: { contains: 'tayyab', mode: 'insensitive' } }
+      where: { partnerName: { contains: 'tayyab' } }
     });
     const aqibTotal = await prisma.partnerWithdrawal.aggregate({
       _sum: { amount: true },
-      where: { partnerName: { contains: 'aqib', mode: 'insensitive' } }
+      where: { partnerName: { contains: 'aqib' } }
     });
 
     return {
@@ -1846,3 +1973,75 @@ async function resetDatabase() {
     return { success: false, error: err.message };
   }
 }
+
+// --- Backup & Restore (Cloud Snapshots) ---
+
+async function createBackup() {
+  const { createFullBackup } = require('./backupService');
+  return await createFullBackup();
+}
+
+async function restoreBackup(data) {
+  const { restoreFromBackup } = require('./backupService');
+  return await restoreFromBackup(data.backupId);
+}
+
+async function listBackups() {
+  const { listBackups } = require('./backupService');
+  return await listBackups();
+}
+
+module.exports = {
+  getDashboardSummary,
+  getRecentTransactions,
+  getLowStockAlerts,
+  getProducts,
+  createProduct,
+  getProductDetails,
+  getSuppliers,
+  createSupplier,
+  createPurchase,
+  adjustStock,
+  getBatches,
+  getCustomers,
+  createCustomer,
+  getCustomerLedger,
+  receiveCustomerPayment,
+  createSale,
+  getSaleByInvoice,
+  getRecipes,
+  createRecipe,
+  executeProduction,
+  getBranchTransactions,
+  createBranchTransaction,
+  getExpenses,
+  createExpense,
+  updateExpense,
+  deleteExpense,
+  updateCustomer,
+  deleteCustomer,
+  updateProduct,
+  deleteProduct,
+  deleteSale,
+  deleteLedgerEntry,
+  deleteBatch,
+  updateRecipe,
+  deleteRecipe,
+  createSaleAddons,
+  getPartnerWithdrawals,
+  createPartnerWithdrawal,
+  deletePartnerWithdrawal,
+  getDailyProfit,
+  cashBoxDeposit,
+  cashBoxWithdraw,
+  getCashBoxBalance,
+  getCashBoxTransactions,
+  getReportsData,
+  resetDatabase,
+  createBackup,
+  restoreBackup,
+  listBackups,
+  isPaidByMainBranch,
+  stockInProductUnit,
+  prisma
+};
