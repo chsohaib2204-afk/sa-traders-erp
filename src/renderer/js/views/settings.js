@@ -56,6 +56,29 @@ export default class SettingsView extends BaseView {
           </ul>
         </div>
 
+        <!-- Backup & Restore (Supabase cloud snapshots) -->
+        <div class="p-6 bg-darkbg-800 border border-slate-700/30 rounded-xl space-y-4">
+          <h3 class="text-sm font-bold text-slate-200 pb-3 border-b border-slate-700/40 uppercase tracking-wider">Cloud Backup</h3>
+          <p class="text-sm text-slate-400">
+            Create a full database snapshot and store it in Supabase. Restore from any previous backup
+            to recover from data loss or machine failure.
+          </p>
+          <div id="backup-error" class="hidden text-xs text-rose-500 bg-rose-500/10 p-3 border border-rose-500/10 rounded-lg font-semibold"></div>
+          <div id="backup-success" class="hidden text-xs text-brand-400 bg-brand-500/10 p-3 border border-brand-500/10 rounded-lg font-semibold"></div>
+          <div id="backup-list" class="text-xs text-slate-400 space-y-1 max-h-32 overflow-y-auto"></div>
+          <div class="flex gap-3 flex-wrap">
+            <button id="btn-create-backup" type="button" class="px-5 py-2.5 bg-brand-600 hover:bg-brand-500 text-white rounded-lg font-semibold text-sm transition-active">
+              Backup Now
+            </button>
+            <button id="btn-list-backups" type="button" class="px-5 py-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg font-semibold text-sm transition-active">
+              View Backups
+            </button>
+            <button id="btn-restore-backup" type="button" class="px-5 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-semibold text-sm transition-active">
+              Restore Selected
+            </button>
+          </div>
+        </div>
+
         <!-- Danger zone: reset -->
         <div class="p-6 bg-rose-500/5 border border-rose-500/20 rounded-xl space-y-4">
           <h3 class="text-sm font-bold text-rose-400 pb-3 border-b border-rose-500/20 uppercase tracking-wider">Danger Zone</h3>
@@ -74,10 +97,125 @@ export default class SettingsView extends BaseView {
   }
 
   async postRender() {
-    const btn = document.getElementById('btn-reset-db');
     const errDiv = document.getElementById('settings-error');
     const okDiv = document.getElementById('settings-success');
 
+    // ── Backup ──────────────────────────────────────────
+    const backupErrDiv = document.getElementById('backup-error');
+    const backupOkDiv = document.getElementById('backup-success');
+    const backupListDiv = document.getElementById('backup-list');
+    const btnCreate = document.getElementById('btn-create-backup');
+    const btnList = document.getElementById('btn-list-backups');
+    const btnRestore = document.getElementById('btn-restore-backup');
+
+    let selectedBackupId = null;
+
+    function showBackupError(msg) {
+      backupErrDiv.innerText = msg;
+      backupErrDiv.classList.remove('hidden');
+      backupOkDiv.classList.add('hidden');
+    }
+
+    function showBackupSuccess(msg) {
+      backupOkDiv.innerText = msg;
+      backupOkDiv.classList.remove('hidden');
+      backupErrDiv.classList.add('hidden');
+    }
+
+    btnCreate.addEventListener('click', async () => {
+      backupErrDiv.classList.add('hidden');
+      backupOkDiv.classList.add('hidden');
+      backupListDiv.innerHTML = '';
+      btnCreate.disabled = true;
+      btnCreate.textContent = 'Backing up...';
+
+      const res = await API.createBackup();
+
+      btnCreate.disabled = false;
+      btnCreate.textContent = 'Backup Now';
+
+      if (res.success) {
+        showBackupSuccess(`Backup created: ${res.data.backupName}`);
+      } else {
+        showBackupError(res.error || 'Backup failed.');
+      }
+    });
+
+    btnList.addEventListener('click', async () => {
+      backupErrDiv.classList.add('hidden');
+      backupOkDiv.classList.add('hidden');
+      backupListDiv.innerHTML = '<span class="text-slate-500">Loading...</span>';
+
+      const res = await API.listBackups();
+
+      if (!res.success) {
+        backupListDiv.innerHTML = '';
+        showBackupError(res.error || 'Failed to list backups.');
+        return;
+      }
+
+      if (!res.data || res.data.length === 0) {
+        backupListDiv.innerHTML = '<span class="text-slate-500">No backups found.</span>';
+        return;
+      }
+
+      backupListDiv.innerHTML = res.data.map((b) => {
+        const date = b.createdAt ? new Date(b.createdAt).toLocaleString() : 'unknown';
+        const checked = selectedBackupId === b.id ? 'checked' : '';
+        return `<label class="flex items-center gap-2 py-1 cursor-pointer hover:text-slate-200">
+          <input type="radio" name="backup-select" value="${b.id}" ${checked} class="accent-brand-500">
+          <span>${b.backupName} — ${date}</span>
+        </label>`;
+      }).join('');
+
+      // Wire radio change handler
+      backupListDiv.querySelectorAll('input[name="backup-select"]').forEach((el) => {
+        el.addEventListener('change', () => { selectedBackupId = el.value; });
+      });
+
+      // Auto-select first if none selected
+      const firstRadio = backupListDiv.querySelector('input[name="backup-select"]');
+      if (firstRadio && !selectedBackupId) {
+        firstRadio.checked = true;
+        selectedBackupId = firstRadio.value;
+      }
+    });
+
+    btnRestore.addEventListener('click', async () => {
+      if (!selectedBackupId) {
+        showBackupError('Select a backup from the list first.');
+        return;
+      }
+
+      const confirmed = window.confirm(
+        '⚠️  RESTORE WILL REPLACE ALL CURRENT DATA with the backup snapshot.\n\n' +
+        'This cannot be undone. Continue?'
+      );
+      if (!confirmed) return;
+
+      const doubleCheck = window.confirm(
+        'Final confirmation: all current inventory, sales, khata, expenses will be replaced. Proceed?'
+      );
+      if (!doubleCheck) return;
+
+      btnRestore.disabled = true;
+      btnRestore.textContent = 'Restoring...';
+
+      const res = await API.restoreBackup(selectedBackupId);
+
+      btnRestore.disabled = false;
+      btnRestore.textContent = 'Restore Selected';
+
+      if (res.success) {
+        showBackupSuccess('Database restored successfully. Reloading app...');
+        setTimeout(() => location.reload(), 2000);
+      } else {
+        showBackupError(res.error || 'Restore failed.');
+      }
+    });
+
+    // ── Reset ───────────────────────────────────────────
+    const btn = document.getElementById('btn-reset-db');
     btn.addEventListener('click', async () => {
       errDiv.classList.add('hidden');
       okDiv.classList.add('hidden');

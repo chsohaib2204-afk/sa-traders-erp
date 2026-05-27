@@ -883,6 +883,10 @@ video {
   height: 100vh;
 }
 
+.max-h-32 {
+  max-height: 8rem;
+}
+
 .max-h-\[220px\] {
   max-height: 220px;
 }
@@ -1139,6 +1143,10 @@ video {
 
 .flex-col {
   flex-direction: column;
+}
+
+.flex-wrap {
+  flex-wrap: wrap;
 }
 
 .items-start {
@@ -1480,6 +1488,11 @@ video {
 
 .bg-amber-500\/10 {
   background-color: rgb(245 158 11 / 0.1);
+}
+
+.bg-amber-600 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(217 119 6 / var(--tw-bg-opacity, 1));
 }
 
 .bg-amber-950\/20 {
@@ -2078,6 +2091,11 @@ video {
   color: rgb(167 139 250 / var(--tw-text-opacity, 1));
 }
 
+.text-white {
+  --tw-text-opacity: 1;
+  color: rgb(255 255 255 / var(--tw-text-opacity, 1));
+}
+
 .text-yellow-400 {
   --tw-text-opacity: 1;
   color: rgb(250 204 21 / var(--tw-text-opacity, 1));
@@ -2223,6 +2241,12 @@ video {
   transition-duration: 300ms;
 }
 
+/* Compact base — shrink everything ~12.5% for a denser desktop ERP look */
+
+html {
+  font-size: 14px;
+}
+
 /* Custom scrollbars for a premium desktop experience */
 
 ::-webkit-scrollbar {
@@ -2295,6 +2319,11 @@ video {
 
 .hover\:border-brand-500\/50:hover {
   border-color: rgb(34 197 94 / 0.5);
+}
+
+.hover\:bg-amber-500:hover {
+  --tw-bg-opacity: 1;
+  background-color: rgb(245 158 11 / var(--tw-bg-opacity, 1));
 }
 
 .hover\:bg-brand-500:hover {

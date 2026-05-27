@@ -265,6 +265,7 @@ model StockMovement {
   unit        String
   description String?
   createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @default(now())
 }
 
 // 17. SaleAddon Model (Extra charges during invoicing)
@@ -275,6 +276,7 @@ model SaleAddon {
   title     String
   amount    Float
   createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
 }
 
 // 18. CashBox Model (Tracks cash/bank deposits and withdrawals)
@@ -288,6 +290,7 @@ model CashBox {
   referenceId String?
   runningBalance Float
   createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now())
 }
 
 // 19. PartnerWithdrawal Model
@@ -297,4 +300,19 @@ model PartnerWithdrawal {
   amount      Float
   note        String?
   createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now())
+}
+
+// 20. SyncQueue Model (Offline-first sync tracking for every DB mutation)
+// Every CREATE / UPDATE / DELETE on any business table enqueues a SyncQueue record.
+// Status transitions: PENDING → SYNCED (on successful cloud push) or FAILED.
+model SyncQueue {
+  id        String   @id @default(uuid())
+  tableName String   // e.g. "sale", "customer", "stockMovement"
+  recordId  String   // Primary key of the affected row
+  operation String   // "CREATE" | "UPDATE" | "DELETE"
+  payload   String   // Full JSON snapshot of the record (or {id} for DELETE)
+  status    String   @default("PENDING")  // "PENDING" | "SYNCED" | "FAILED"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

@@ -16,6 +16,9 @@ export default class SalesView extends BaseView {
     this.saleRows = [{ productId: '', batchId: '', quantity: 1, sellingPrice: 0, unit: 'bag', priceType: 'default', subtotal: 0 }];
     this.discount = 0;
     this.addons = [{ name: '', amount: 0 }];
+
+    // Tracks if user manually edited the paid amount field
+    this.paidManuallyEdited = false;
   }
 
   async preRender() {
@@ -252,6 +255,20 @@ export default class SalesView extends BaseView {
       const net = Math.max(0, gross - disc);
       document.getElementById('pos-net').innerText = `Rs. ${net.toLocaleString()}`;
 
+      // Expose so setupAddons and other sibling methods can call it
+      this.updateInvoicingTotals = updateInvoicingTotals;
+
+      // Auto-fill paid amount: instant methods get net, credit methods get 0
+      // Stop auto-overwriting once user manually edits the field
+      const isInstantPay = this.paymentMethod === 'CASH' || this.paymentMethod === 'BANK';
+      if (!this.paidManuallyEdited) {
+        if (isInstantPay) {
+          inputReceived.value = net;
+        } else {
+          inputReceived.value = 0;
+        }
+      }
+
       const received = parseFloat(inputReceived.value) || 0.0;
       const unpaid = Math.max(0, net - received);
 
@@ -386,7 +403,10 @@ export default class SalesView extends BaseView {
     });
 
     inputDiscount.addEventListener('input', updateInvoicingTotals);
-    inputReceived.addEventListener('input', updateInvoicingTotals);
+    inputReceived.addEventListener('input', () => {
+      this.paidManuallyEdited = true;
+      updateInvoicingTotals();
+    });
 
     // Adjust price options automatically when customer is changed
     selectCust.addEventListener('change', () => {
@@ -418,14 +438,8 @@ export default class SalesView extends BaseView {
         this.paymentMethod = 'CASH';
       }
       
-      // Auto fill paid amount for full cash checks
-      if (this.paymentMethod === 'CASH') {
-        let gross = this.saleRows.reduce((sum, r) => sum + r.subtotal, 0);
-        let disc = parseFloat(inputDiscount.value) || 0.0;
-        inputReceived.value = Math.max(0, gross - disc);
-      } else if (this.paymentMethod === 'CREDIT') {
-        inputReceived.value = 0;
-      }
+      // Reset manual edit flag so auto-fill applies with new method
+      this.paidManuallyEdited = false;
       updateInvoicingTotals();
     });
 

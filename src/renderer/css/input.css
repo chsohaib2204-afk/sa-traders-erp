@@ -2,6 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Compact base — shrink everything ~12.5% for a denser desktop ERP look */
+html {
+  font-size: 14px;
+}
+
 /* Custom scrollbars for a premium desktop experience */
 ::-webkit-scrollbar {
   width: 6px;

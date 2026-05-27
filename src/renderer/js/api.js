@@ -192,6 +192,19 @@ const API = {
 
   async resetDatabase() {
     return await this.dbAction('reset-database');
+  },
+
+  // --- Backup & Restore ---
+  async createBackup() {
+    return await this.dbAction('create-backup');
+  },
+
+  async restoreBackup(backupId) {
+    return await this.dbAction('restore-backup', { backupId });
+  },
+
+  async listBackups() {
+    return await this.dbAction('list-backups');
   }
 };
 
