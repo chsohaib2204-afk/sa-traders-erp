@@ -65,11 +65,17 @@ async function syncPendingQueue() {
   try {
     if (!(await isOnline())) return;
 
-    const records = await prisma.syncQueue.findMany({
-      where: { status: { in: ['PENDING', 'FAILED'] } },
-      orderBy: [{ status: 'asc' }, { createdAt: 'asc' }],
-      take: 20,
-    });
+    let records;
+    try {
+      records = await prisma.syncQueue.findMany({
+        where: { status: { in: ['PENDING', 'FAILED'] } },
+        orderBy: [{ status: 'asc' }, { createdAt: 'asc' }],
+        take: 20,
+      });
+    } catch (dbErr) {
+      console.warn('[SyncService] DB not ready:', dbErr.message);
+      return;
+    }
 
     if (records.length === 0) return;
 

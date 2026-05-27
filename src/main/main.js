@@ -2,22 +2,28 @@ const { app, BrowserWindow, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
-// Force 100% scale — ignore OS-level DPI scaling (e.g. Windows 150% or macOS "Larger Text")
-app.commandLine.appendSwitch('force-device-scale-factor', '1');
+// ─── Global crash prevention ─────────────────────────────
+process.on('unhandledRejection', (reason) => {
+  console.error('[ERP] Unhandled Rejection:', reason?.message || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[ERP] Uncaught Exception:', err.message);
+});
 
-// Load environment variables from .env (if present — optional in production)
+// ─── Environment ─────────────────────────────────────────
+// Load .env from project root (dev) or resources dir (packaged)
 try {
   const dotenv = require('dotenv');
   const envPath = path.join(__dirname, '../../.env');
   if (fs.existsSync(envPath)) dotenv.config({ path: envPath });
 } catch {
-  // dotenv is optional; env vars come from the system or main.js
+  // dotenv optional; env vars come from OS or manual config
 }
 
-// Determine if we are in development mode
+app.commandLine.appendSwitch('force-device-scale-factor', '1');
 const isDev = !app.isPackaged;
 
-// Configure SQLite database path dynamically
+// ─── Database path ───────────────────────────────────────
 const dbDir = isDev
   ? path.join(__dirname, '../database')
   : path.join(app.getPath('userData'), 'database');
@@ -27,13 +33,13 @@ if (!fs.existsSync(dbDir)) {
 }
 
 const dbPath = path.join(dbDir, isDev ? 'dev.db' : 'prod.db');
-// Set DATABASE_URL environment variable dynamically before loading prisma handlers
 process.env.DATABASE_URL = `file:${dbPath}`;
-
-console.log(`[ERP Startup] Database path set to: ${dbPath}`);
+console.log(`[ERP Startup] Database: ${dbPath}`);
 
 let mainWindow;
+let dbReady = false;
 
+// ─── Window creation ─────────────────────────────────────
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -42,24 +48,21 @@ function createWindow() {
     minHeight: 768,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,     // Protect execution context
-      nodeIntegration: false,    // Avoid direct Node.js exposure in renderer
-      sandbox: true              // Run renderer process in sandbox
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
     },
-    title: "SA Traders ERP",
+    title: 'SA Traders ERP',
     show: false,
-    autoHideMenuBar: true
+    autoHideMenuBar: true,
   });
 
-  // Load the SPA UI
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.maximize();
     mainWindow.show();
-    if (isDev) {
-      mainWindow.webContents.openDevTools();
-    }
+    if (isDev) mainWindow.webContents.openDevTools();
   });
 
   mainWindow.on('closed', () => {
@@ -67,28 +70,38 @@ function createWindow() {
   });
 }
 
-// Initialize application
+// ─── Bootstrap (DB → IPC → Sync → UI) ───────────────────
 app.whenReady().then(async () => {
   try {
-    // Create tables if dev.db exists but schema was never pushed
+    // 1. Database bootstrap (creates tables, runs migrations)
     const { ensureDatabaseSchema } = require('./ensureDatabase');
-    await ensureDatabaseSchema();
+    const bootResult = await ensureDatabaseSchema();
+    dbReady = bootResult.success;
 
-    // Load IPC database controllers (after schema exists)
+    if (!dbReady) {
+      console.error('[ERP] Database init failed:', bootResult.error);
+    }
+
+    // 2. Load IPC handlers (non-blocking)
     try {
       require('./ipcHandlers');
     } catch (err) {
-      console.error('[ERP] Failed to load IPC handlers:', err);
+      console.error('[ERP] IPC handlers failed:', err);
     }
 
-    // Start background sync engine (offline → Supabase)
-    try {
-      const { startSyncService } = require('./syncService');
-      startSyncService();
-    } catch (err) {
-      console.error('[ERP] Failed to start sync service:', err);
+    // 3. Start sync service ONLY after DB is confirmed ready
+    if (dbReady) {
+      try {
+        const { startSyncService } = require('./syncService');
+        startSyncService();
+      } catch (err) {
+        console.error('[ERP] Sync service failed:', err);
+      }
+    } else {
+      console.log('[ERP] DB not ready — sync disabled');
     }
 
+    // 4. Create window last
     createWindow();
 
     app.on('activate', () => {
@@ -99,22 +112,17 @@ app.whenReady().then(async () => {
     try {
       dialog.showErrorBox('SA Traders ERP — Startup Error', err.stack || err.message);
     } catch {
-      // dialog may not be available yet; worst case, silently fail
+      // dialog unavailable — silently fail
     }
     app.quit();
   }
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  if (process.platform !== 'darwin') app.quit();
 });
 
 // ─── Auto-backup on quit ─────────────────────────────────
-// Performs a full cloud backup before the app exits, then
-// enforces the 30-backup retention policy.
-
 let isQuitting = false;
 const BACKUP_TIMEOUT_MS = 30_000;
 
@@ -123,6 +131,12 @@ app.on('before-quit', async (event) => {
   event.preventDefault();
   isQuitting = true;
 
+  if (!dbReady) {
+    console.log('[Backup] DB not ready — skipping backup');
+    app.quit();
+    return;
+  }
+
   console.log('[Backup] Auto backup on exit…');
 
   let timeoutId;
@@ -130,7 +144,7 @@ app.on('before-quit', async (event) => {
     const { createFullBackup, cleanupOldBackups } = require('./backupService');
     const result = await createFullBackup();
     if (result.success) {
-      console.log('[Backup] Auto backup completed before exit');
+      console.log('[Backup] Auto backup completed');
       await cleanupOldBackups();
     } else {
       console.log('[Backup] Auto backup failed, continuing shutdown');

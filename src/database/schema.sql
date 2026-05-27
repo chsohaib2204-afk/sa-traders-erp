@@ -241,6 +241,17 @@ CREATE TABLE IF NOT EXISTS "PartnerWithdrawal" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS "SyncQueue" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "tableName" TEXT NOT NULL,
+    "recordId" TEXT NOT NULL,
+    "operation" TEXT NOT NULL,
+    "payload" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'PENDING',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS "Product_sku_key" ON "Product"("sku");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "ProductBatch_batchNumber_key" ON "ProductBatch"("batchNumber");

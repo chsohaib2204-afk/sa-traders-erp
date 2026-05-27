@@ -6,6 +6,10 @@
  * Every mutation is wrapped WITH the caller's Prisma transaction (tx)
  * to guarantee atomicity: either the business write + sync entry both
  * commit, or both roll back.
+ *
+ * If the SyncQueue table is missing or a write fails, the error is
+ * logged silently and the business operation still succeeds — the app
+ * continues in offline-only mode.
  */
 
 /**
@@ -18,25 +22,21 @@
  * @param {object} payload    — full snapshot for CREATE/UPDATE, {id} for DELETE
  */
 async function enqueueSync(tx, tableName, recordId, operation, payload) {
-  await tx.syncQueue.create({
-    data: {
-      tableName,
-      recordId,
-      operation,
-      payload: JSON.stringify(payload),
-      status: 'PENDING',
-    },
-  });
+  try {
+    await tx.syncQueue.create({
+      data: {
+        tableName,
+        recordId,
+        operation,
+        payload: JSON.stringify(payload),
+        status: 'PENDING',
+      },
+    });
+  } catch (err) {
+    console.warn(`[SyncQueue] Failed to enqueue ${operation} on ${tableName}: ${err.message}`);
+  }
 }
 
-/**
- * Wraps a single Prisma create call inside a transaction with sync logging.
- *
- * @param {import('@prisma/client').PrismaClient} prisma
- * @param {string} tableName
- * @param {(tx: import('@prisma/client').Prisma.TransactionClient) => Promise<any>} createFn
- * @returns {Promise<{record: any, syncId: string}>}
- */
 async function createWithSync(prisma, tableName, createFn) {
   return await prisma.$transaction(async (tx) => {
     const record = await createFn(tx);
@@ -45,14 +45,6 @@ async function createWithSync(prisma, tableName, createFn) {
   });
 }
 
-/**
- * Wraps a single Prisma update call inside a transaction with sync logging.
- *
- * @param {import('@prisma/client').PrismaClient} prisma
- * @param {string} tableName
- * @param {(tx: import('@prisma/client').Prisma.TransactionClient) => Promise<any>} updateFn
- * @returns {Promise<{record: any, syncId: string}>}
- */
 async function updateWithSync(prisma, tableName, updateFn) {
   return await prisma.$transaction(async (tx) => {
     const record = await updateFn(tx);
@@ -61,16 +53,6 @@ async function updateWithSync(prisma, tableName, updateFn) {
   });
 }
 
-/**
- * Wraps a Prisma delete inside a transaction with sync logging.
- * Captures the record BEFORE deletion so the payload contains the full snapshot.
- *
- * @param {import('@prisma/client').PrismaClient} prisma
- * @param {string} tableName
- * @param {(tx: import('@prisma/client').Prisma.TransactionClient) => Promise<{id: string}>} beforeDeleteFn  — captures the record before deletion
- * @param {(tx: import('@prisma/client').Prisma.TransactionClient) => Promise<void>} deleteFn
- * @returns {Promise<{deletedId: string}>}
- */
 async function deleteWithSync(prisma, tableName, beforeDeleteFn, deleteFn) {
   return await prisma.$transaction(async (tx) => {
     const record = await beforeDeleteFn(tx);
