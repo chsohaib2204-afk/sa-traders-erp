@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -60,22 +60,40 @@ function createWindow() {
 
 // Initialize application
 app.whenReady().then(async () => {
-  // Create tables if dev.db exists but schema was never pushed
-  const { ensureDatabaseSchema } = require('./ensureDatabase');
-  await ensureDatabaseSchema();
+  try {
+    // Create tables if dev.db exists but schema was never pushed
+    const { ensureDatabaseSchema } = require('./ensureDatabase');
+    await ensureDatabaseSchema();
 
-  // Load IPC database controllers (after schema exists)
-  require('./ipcHandlers');
+    // Load IPC database controllers (after schema exists)
+    try {
+      require('./ipcHandlers');
+    } catch (err) {
+      console.error('[ERP] Failed to load IPC handlers:', err);
+    }
 
-  // Start background sync engine (offline → Supabase)
-  const { startSyncService } = require('./syncService');
-  startSyncService();
+    // Start background sync engine (offline → Supabase)
+    try {
+      const { startSyncService } = require('./syncService');
+      startSyncService();
+    } catch (err) {
+      console.error('[ERP] Failed to start sync service:', err);
+    }
 
-  createWindow();
+    createWindow();
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  } catch (err) {
+    console.error('[ERP] Fatal startup error:', err);
+    try {
+      dialog.showErrorBox('SA Traders ERP — Startup Error', err.stack || err.message);
+    } catch {
+      // dialog may not be available yet; worst case, silently fail
+    }
+    app.quit();
+  }
 });
 
 app.on('window-all-closed', () => {
