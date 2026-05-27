@@ -1,23 +1,16 @@
 /**
- * Cloud Backup + Restore System.
+ * Local + Cloud Backup & Restore System.
  *
- * Full-database JSON snapshots uploaded to Supabase Storage ("backups" bucket).
- * Does NOT interact with the SyncQueue system — runs independently
- * for disaster recovery purposes only.
+ * Full-database JSON snapshots saved locally alongside the SQLite database.
+ * When SUPABASE_URL and SUPABASE_ANON_KEY are configured, also uploads to
+ * Supabase Storage ("backups" bucket) for off-site disaster recovery.
  *
- * Why Storage instead of a DB table?
- *   - No DDL / CREATE TABLE needed — buckets are managed objects
- *   - Snapshots are large JSON blobs, ideal for object storage
- *   - Upload / download never hits schema cache
- *
- * ⚠️  One-time setup in Supabase Dashboard (< 30 sec):
- *     1. Go to Storage → New Bucket → name = "backups", public = OFF
- *     2. Click the "backups" bucket → Policies → New Policy →
- *        "Allow all operations" (or tailor INSERT / SELECT / DELETE for anon)
- *     3. Optionally add "Allow anon to upload" with a USING check of true
+ * Does NOT interact with the SyncQueue system — runs independently.
  */
-try { require('dotenv').config({ path: require('path').join(__dirname, '../../.env') }); } catch {} // optional
+try { require('dotenv').config({ path: require('path').join(__dirname, '../../.env') }); } catch {}
 
+const path = require('path');
+const fs = require('fs');
 const { PrismaClient } = require('../database/generated');
 const { createClient } = require('@supabase/supabase-js');
 
@@ -40,12 +33,24 @@ if (SUPABASE_URL && SUPABASE_ANON_KEY) {
   }
 }
 
+// ─── Local backup directory (derived from DATABASE_URL) ──
+function getLocalBackupDir() {
+  const dbUrl = process.env.DATABASE_URL || '';
+  const filePath = dbUrl.replace(/^file:/i, '').replace(/\\/g, '/');
+  const dbDir = path.dirname(filePath);
+  const backupDir = path.join(dbDir, 'backups');
+  if (!fs.existsSync(backupDir)) {
+    fs.mkdirSync(backupDir, { recursive: true });
+  }
+  return backupDir;
+}
+
 // ─── Helpers ────────────────────────────────────────────
 
 function formatBackupName() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
-  return `AUTO_BACKUP_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+  return `BACKUP_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
 }
 
 function backupFileName(name) {
@@ -68,21 +73,6 @@ function reviveDates(obj) {
     out[k] = (typeof v === 'string' && isoPat.test(v)) ? new Date(v) : v;
   }
   return out;
-}
-
-const BUCKET_NOT_FOUND = /bucket.*not found|does not exist|not found/i;
-const RLS_ERROR = /violates row-level security|permission denied/i;
-
-function isBucketNotFound(err) {
-  return BUCKET_NOT_FOUND.test(err.message || '') || BUCKET_NOT_FOUND.test(err.error || '');
-}
-
-function isRlsError(err) {
-  return RLS_ERROR.test(err.message || '') || RLS_ERROR.test(err.error || '');
-}
-
-function storageSetupGuide() {
-  return 'Create a "backups" bucket in Supabase Dashboard → Storage → New Bucket, then add an RLS policy allowing anon upload/select.';
 }
 
 // ─── Full snapshot (read all models) ────────────────────
@@ -166,14 +156,121 @@ async function restoreTable(tx, model, rows) {
   }
 }
 
-// ─── Public API ─────────────────────────────────────────
+// ─── Local backup operations ────────────────────────────
 
-/**
- * Create a full backup of the local SQLite database, upload to Supabase Storage.
- * No database tables required — uses the "backups" Storage bucket.
- */
-async function createFullBackup() {
-  if (!supabase) return { success: false, error: 'Supabase not configured — check SUPABASE_URL and SUPABASE_ANON_KEY in .env' };
+function getLocalMetadata(backupDir) {
+  const items = [];
+  try {
+    const files = fs.readdirSync(backupDir);
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue;
+      const filePath = path.join(backupDir, file);
+      const stat = fs.statSync(filePath);
+      items.push({
+        id: parseBackupName(file),
+        backupName: parseBackupName(file),
+        createdAt: stat.mtime.toISOString(),
+        localPath: filePath,
+      });
+    }
+  } catch {}
+  items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  return items;
+}
+
+async function createLocalBackup() {
+  try {
+    const snapshot = await readFullSnapshot();
+    const backupDir = getLocalBackupDir();
+    const backupName = formatBackupName();
+    const filePath = path.join(backupDir, backupFileName(backupName));
+    fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
+    console.log(`[BackupService] Local backup saved: ${filePath}`);
+    return { success: true, data: { id: backupName, backupName, createdAt: new Date().toISOString() } };
+  } catch (err) {
+    console.error('[BackupService] Local backup failed:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+async function restoreLocalBackup(backupId) {
+  const backupDir = getLocalBackupDir();
+  const filePath = path.join(backupDir, backupFileName(backupId));
+  if (!fs.existsSync(filePath)) {
+    return { success: false, error: `Backup '${backupId}' not found locally.` };
+  }
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const snapshot = JSON.parse(raw);
+    const t = snapshot.tables;
+
+    await prisma.$transaction(async (tx) => {
+      await clearAllTables(tx);
+      await restoreTable(tx, 'customer', t.customers || []);
+      await restoreTable(tx, 'supplier', t.suppliers || []);
+      await restoreTable(tx, 'product', t.products || []);
+      await restoreTable(tx, 'expense', t.expenses || []);
+      await restoreTable(tx, 'cashBox', t.cashBox || []);
+      await restoreTable(tx, 'partnerWithdrawal', t.partnerWithdrawals || []);
+      await restoreTable(tx, 'mainBranchTransaction', t.mainBranchTransactions || []);
+      await restoreTable(tx, 'purchase', t.purchases || []);
+      await restoreTable(tx, 'recipe', t.recipes || []);
+      await restoreTable(tx, 'production', t.productions || []);
+      await restoreTable(tx, 'productBatch', t.productBatches || []);
+      await restoreTable(tx, 'purchaseItem', t.purchaseItems || []);
+      await restoreTable(tx, 'recipeItem', t.recipeItems || []);
+      await restoreTable(tx, 'sale', t.sales || []);
+      await restoreTable(tx, 'productionItem', t.productionItems || []);
+      await restoreTable(tx, 'saleItem', t.saleItems || []);
+      await restoreTable(tx, 'saleAddon', t.saleAddons || []);
+      await restoreTable(tx, 'ledgerEntry', t.ledgerEntries || []);
+      await restoreTable(tx, 'stockMovement', t.stockMovements || []);
+      await restoreTable(tx, 'syncQueue', t.syncQueue || []);
+    });
+
+    return { success: true, data: { backupName: backupId, restoredAt: new Date().toISOString() } };
+  } catch (err) {
+    console.error('[BackupService] Local restore failed:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+async function listLocalBackups() {
+  const backupDir = getLocalBackupDir();
+  const items = getLocalMetadata(backupDir);
+  return { success: true, data: items };
+}
+
+async function deleteOldLocalBackups(maxCount) {
+  const backupDir = getLocalBackupDir();
+  const items = getLocalMetadata(backupDir);
+  if (items.length <= maxCount) return;
+  for (const item of items.slice(maxCount)) {
+    try {
+      fs.unlinkSync(item.localPath);
+    } catch {}
+  }
+}
+
+// ─── Cloud (Supabase) helpers ────────────────────────────
+
+const BUCKET_NOT_FOUND = /bucket.*not found|does not exist|not found/i;
+const RLS_ERROR = /violates row-level security|permission denied/i;
+
+function isBucketNotFound(err) {
+  return BUCKET_NOT_FOUND.test(err.message || '') || BUCKET_NOT_FOUND.test(err.error || '');
+}
+
+function isRlsError(err) {
+  return RLS_ERROR.test(err.message || '') || RLS_ERROR.test(err.error || '');
+}
+
+function storageSetupGuide() {
+  return 'Create a "backups" bucket in Supabase Dashboard → Storage → New Bucket, then add an RLS policy allowing anon upload/select.';
+}
+
+async function createCloudBackup() {
+  if (!supabase) return { success: false, error: 'Supabase not configured' };
 
   try {
     const snapshot = await readFullSnapshot();
@@ -207,21 +304,12 @@ async function createFullBackup() {
 
     return { success: true, data: { id: backupName, backupName, createdAt: new Date().toISOString() } };
   } catch (err) {
-    console.error('[BackupService] Backup failed:', err.message);
+    console.error('[BackupService] Cloud backup failed:', err.message);
     return { success: false, error: err.message };
   }
 }
 
-/**
- * Restore the full database from a cloud backup stored in Supabase Storage.
- *
- * 1. Download snapshot JSON from the "backups" bucket
- * 2. Clear ALL local tables
- * 3. Re-insert every record preserving original IDs
- *
- * ⚠️  This is destructive — all current data is replaced.
- */
-async function restoreFromBackup(backupId) {
+async function restoreCloudBackup(backupId) {
   if (!supabase) return { success: false, error: 'Supabase not configured' };
 
   try {
@@ -244,8 +332,6 @@ async function restoreFromBackup(backupId) {
 
     await prisma.$transaction(async (tx) => {
       await clearAllTables(tx);
-
-      // 1. Tables with NO foreign keys (independent)
       await restoreTable(tx, 'customer', t.customers || []);
       await restoreTable(tx, 'supplier', t.suppliers || []);
       await restoreTable(tx, 'product', t.products || []);
@@ -253,40 +339,29 @@ async function restoreFromBackup(backupId) {
       await restoreTable(tx, 'cashBox', t.cashBox || []);
       await restoreTable(tx, 'partnerWithdrawal', t.partnerWithdrawals || []);
       await restoreTable(tx, 'mainBranchTransaction', t.mainBranchTransactions || []);
-
-      // 2. Tables that depend ONLY on the above
-      await restoreTable(tx, 'purchase', t.purchases || []);            // FK: supplier
-      await restoreTable(tx, 'recipe', t.recipes || []);                // FK: product
-      await restoreTable(tx, 'production', t.productions || []);        // no declared FK
-
-      // 3. Tables that depend on group 2 parents
-      await restoreTable(tx, 'productBatch', t.productBatches || []);   // FK: product, supplier, purchase
-      await restoreTable(tx, 'purchaseItem', t.purchaseItems || []);    // FK: purchase, product
-      await restoreTable(tx, 'recipeItem', t.recipeItems || []);        // FK: recipe, product
-      await restoreTable(tx, 'sale', t.sales || []);                    // FK: customer
-
-      // 4. Tables that depend on group 3 parents (or earlier)
-      await restoreTable(tx, 'productionItem', t.productionItems || []); // FK: production, product, batch
-      await restoreTable(tx, 'saleItem', t.saleItems || []);             // FK: sale, product, batch
-      await restoreTable(tx, 'saleAddon', t.saleAddons || []);           // FK: sale
-      await restoreTable(tx, 'ledgerEntry', t.ledgerEntries || []);      // FK: customer, sale
-      await restoreTable(tx, 'stockMovement', t.stockMovements || []);   // FK: product, batch
-
-      // 5. SyncQueue (no external FKs)
+      await restoreTable(tx, 'purchase', t.purchases || []);
+      await restoreTable(tx, 'recipe', t.recipes || []);
+      await restoreTable(tx, 'production', t.productions || []);
+      await restoreTable(tx, 'productBatch', t.productBatches || []);
+      await restoreTable(tx, 'purchaseItem', t.purchaseItems || []);
+      await restoreTable(tx, 'recipeItem', t.recipeItems || []);
+      await restoreTable(tx, 'sale', t.sales || []);
+      await restoreTable(tx, 'productionItem', t.productionItems || []);
+      await restoreTable(tx, 'saleItem', t.saleItems || []);
+      await restoreTable(tx, 'saleAddon', t.saleAddons || []);
+      await restoreTable(tx, 'ledgerEntry', t.ledgerEntries || []);
+      await restoreTable(tx, 'stockMovement', t.stockMovements || []);
       await restoreTable(tx, 'syncQueue', t.syncQueue || []);
     });
 
     return { success: true, data: { backupName: backupId, restoredAt: new Date().toISOString() } };
   } catch (err) {
-    console.error('[BackupService] Restore failed:', err.message);
+    console.error('[BackupService] Cloud restore failed:', err.message);
     return { success: false, error: err.message };
   }
 }
 
-/**
- * List all available backups from Supabase Storage.
- */
-async function listBackups() {
+async function listCloudBackups() {
   if (!supabase) return { success: false, error: 'Supabase not configured' };
 
   try {
@@ -315,42 +390,86 @@ async function listBackups() {
   }
 }
 
-const MAX_BACKUPS = 30;
-
-/**
- * Delete a single backup file from Supabase Storage.
- */
-async function deleteBackup(fileName) {
+async function deleteCloudBackup(fileName) {
   if (!supabase) return;
   const { error } = await supabase.storage.from(BUCKET).remove([fileName]);
-  if (error) console.warn('[BackupService] Failed to delete backup:', error.message);
+  if (error) console.warn('[BackupService] Failed to delete cloud backup:', error.message);
 }
 
-/**
- * Enforce retention policy — keep only the newest MAX_BACKUPS backups.
- * Must be called AFTER a successful backup so the just-created backup
- * is always preserved.
- */
-async function cleanupOldBackups() {
+const MAX_BACKUPS = 30;
+
+async function cleanupOldCloudBackups() {
   if (!supabase) return;
 
-  const listResult = await listBackups();
+  const listResult = await listCloudBackups();
   if (!listResult.success) {
-    console.warn('[BackupService] Retention: could not list backups:', listResult.error);
+    console.warn('[BackupService] Retention: could not list cloud backups:', listResult.error);
     return;
   }
 
   const backups = listResult.data;
   if (backups.length <= MAX_BACKUPS) return;
 
-  // listBackups returns newest-first, so excess are at the tail
   const toDelete = backups.slice(MAX_BACKUPS);
-
   for (const b of toDelete) {
-    await deleteBackup(backupFileName(b.id));
+    await deleteCloudBackup(backupFileName(b.id));
   }
-
 }
 
+// ─── Public API (auto-fallback: local → Supabase) ───────
+
+async function createFullBackup() {
+  // Always save locally
+  const localResult = await createLocalBackup();
+  if (!localResult.success) return localResult;
+
+  // Also attempt cloud if Supabase is configured (non-blocking)
+  if (supabase) {
+    createCloudBackup().then((cloudResult) => {
+      if (!cloudResult.success) {
+        console.warn('[BackupService] Cloud backup skipped:', cloudResult.error);
+      }
+    }).catch(() => {});
+  }
+
+  return localResult;
+}
+
+async function restoreFromBackup(backupId) {
+  // Try local first, then cloud
+  const localResult = await restoreLocalBackup(backupId);
+  if (localResult.success) return localResult;
+
+  if (supabase) {
+    return await restoreCloudBackup(backupId);
+  }
+
+  return localResult;
+}
+
+async function listBackups() {
+  // Merge local + cloud lists
+  const localResult = await listLocalBackups();
+  const localBackups = localResult.success ? (localResult.data || []) : [];
+
+  let cloudBackups = [];
+  if (supabase) {
+    const cloudResult = await listCloudBackups();
+    if (cloudResult.success) cloudBackups = cloudResult.data || [];
+  }
+
+  // Merge by id (local overrides cloud for same name)
+  const merged = {};
+  for (const b of cloudBackups) merged[b.id] = { ...b, source: 'cloud' };
+  for (const b of localBackups) merged[b.id] = { ...b, source: 'local' };
+
+  const all = Object.values(merged).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  return { success: true, data: all };
+}
+
+async function cleanupOldBackups() {
+  await deleteOldLocalBackups(MAX_BACKUPS);
+  await cleanupOldCloudBackups();
+}
 
 module.exports = { createFullBackup, restoreFromBackup, listBackups, cleanupOldBackups };

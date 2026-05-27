@@ -14,8 +14,13 @@ process.on('uncaughtException', (err) => {
 // Load .env from project root (dev) or resources dir (packaged)
 try {
   const dotenv = require('dotenv');
-  const envPath = path.join(__dirname, '../../.env');
-  if (fs.existsSync(envPath)) dotenv.config({ path: envPath });
+  const possiblePaths = [
+    path.join(__dirname, '../../.env'),
+    path.join(process.resourcesPath || '', '.env'),
+  ];
+  for (const envPath of possiblePaths) {
+    if (fs.existsSync(envPath)) { dotenv.config({ path: envPath }); break; }
+  }
 } catch {
   // dotenv optional; env vars come from OS or manual config
 }
@@ -33,7 +38,7 @@ if (!fs.existsSync(dbDir)) {
 }
 
 const dbPath = path.join(dbDir, isDev ? 'dev.db' : 'prod.db');
-process.env.DATABASE_URL = `file:${dbPath}`;
+process.env.DATABASE_URL = `file:${dbPath.replace(/\\/g, '/')}`;
 console.log(`[ERP Startup] Database: ${dbPath}`);
 
 let mainWindow;

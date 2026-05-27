@@ -44,8 +44,11 @@ async function ensureDatabaseSchema() {
       `ALTER TABLE "SaleAddon" ADD COLUMN "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`,
       `ALTER TABLE "PartnerWithdrawal" ADD COLUMN "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`,
       `ALTER TABLE "CashBox" ADD COLUMN "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`,
-      // StockMovement.updatedAt added later
+      // updatedAt columns added later
       `ALTER TABLE "StockMovement" ADD COLUMN "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`,
+      `ALTER TABLE "CashBox" ADD COLUMN "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`,
+      `ALTER TABLE "SaleAddon" ADD COLUMN "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`,
+      `ALTER TABLE "PartnerWithdrawal" ADD COLUMN "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`,
       // SyncQueue.status default
       `ALTER TABLE "SyncQueue" ADD COLUMN "status" TEXT NOT NULL DEFAULT 'PENDING'`,
     ];
