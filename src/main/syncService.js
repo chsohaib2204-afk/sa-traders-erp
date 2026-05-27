@@ -8,7 +8,7 @@
  * Does NOT modify business logic or SyncQueue creation — it only
  * reads existing SyncQueue rows and updates their status.
  */
-require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
+try { require('dotenv').config({ path: require('path').join(__dirname, '../../.env') }); } catch {} // optional
 
 const { PrismaClient } = require('../database/generated');
 const { createClient } = require('@supabase/supabase-js');

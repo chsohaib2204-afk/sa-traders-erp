@@ -16,7 +16,7 @@
  *        "Allow all operations" (or tailor INSERT / SELECT / DELETE for anon)
  *     3. Optionally add "Allow anon to upload" with a USING check of true
  */
-require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
+try { require('dotenv').config({ path: require('path').join(__dirname, '../../.env') }); } catch {} // optional
 
 const { PrismaClient } = require('../database/generated');
 const { createClient } = require('@supabase/supabase-js');

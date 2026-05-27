@@ -5,6 +5,15 @@ const fs = require('fs');
 // Force 100% scale — ignore OS-level DPI scaling (e.g. Windows 150% or macOS "Larger Text")
 app.commandLine.appendSwitch('force-device-scale-factor', '1');
 
+// Load environment variables from .env (if present — optional in production)
+try {
+  const dotenv = require('dotenv');
+  const envPath = path.join(__dirname, '../../.env');
+  if (fs.existsSync(envPath)) dotenv.config({ path: envPath });
+} catch {
+  // dotenv is optional; env vars come from the system or main.js
+}
+
 // Determine if we are in development mode
 const isDev = !app.isPackaged;
 
